@@ -81,15 +81,16 @@ void CSP_PDO_mapping(uint16 slave){
 	EC_TIMEOUTSAFE);
 	if(retval<0) printf("Scrittura fallita\n");
 	
-	//primo elemento mappato
+	//il primo elemento è lasciato alla controword che è già impostata di default
+	//secondo elemento mappato
 	//0x607A=taget_position_index, 0x00=target_position_subindex, 0x20=taget_position_bitlength
-	OBentry RxPDO1={0x1600,0x01,sizeof(uint32),0x607A0020}; 
+	OBentry RxPDO1={0x1600,0x02,sizeof(uint32),0x607A0020}; 
 	retval=ec_SDOwrite(slave,RxPDO1.index,RxPDO1.sub_index,FALSE,RxPDO1.size,&(RxPDO1.value),EC_TIMEOUTSAFE);
 	if(retval<0) printf("Scrittura fallita\n");
 	else RxPDOs_number++;
 	
 	//comunico il numero di oggetti mappati
-	RxPDOs_mapped.value=RxPDOs_number;
+	RxPDOs_mapped.value=RxPDOs_number+1;
 	retval=ec_SDOwrite(slave,RxPDOs_mapped.index,RxPDOs_mapped.sub_index,FALSE, RxPDOs_mapped.size,&(RxPDOs_mapped.value),
 	EC_TIMEOUTSAFE);
 	if(retval<0) printf("Scrittura fallita\n");
@@ -422,7 +423,7 @@ void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime)
    static int64 integral = 0;
    int64 delta;
    /* set linux sync point 50us later than DC sync, just as example */
-   delta = (reftime - 50000) % cycletime;
+   delta = (reftime ) % cycletime;
    if(delta> (cycletime / 2)) { delta= delta - cycletime; }
    if(delta>0){ integral++; }
    if(delta<0){ integral--; }
