@@ -66,17 +66,17 @@ typedef struct
       
 } OBentry;
 
-int to_operation_enabled(uint16 slave){
+void to_operation_enabled(uint16 slave){
 	 
 	OBentry controlword={0x6040, 0x00, sizeof(uint16),0}; //comando per eseguire transizioni
     OBentry statusword={0x6041, 0x00, sizeof(uint16),0}; //elemento che rappresenta lo stato
     
-    if(ec_SDOwrite(slave,statusword.index,statusword.sub_index,FALSE, statusword.size,&(statusword.value),EC_TIMEOUTSAFE)){
+    
 		
-		if(statusword.value==
+	
 		
-		}
-    else printf("statusword non letta\n";
+		
+     printf("statusword non letta\n");
     
     
 	
