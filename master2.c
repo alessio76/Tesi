@@ -1,5 +1,5 @@
 
-
+#include <sys/mman.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/time.h>
@@ -20,17 +20,25 @@
 #define EPOS4 1 
 #define DELAY 0
 
+//Stati EPOS state machine
+#define SWITCH_ON_DISABLED 0x40 
+#define READY_TO_SWITCH_ON 0x21
+#define SWITCHED_ON 0x23
+#define OPERATION_ENABLED 0x40  
+#define QUICKSTOP_ACTIVE 0x7
+#define FAULT_REACTION__ACTIVE 0xF
+#define FAULT 0X8
+
+//Comandi EPOS state machine
+#define SHUTDOWN 0X6
+#define SWITCH_ON 0x7
+#define SWITCH_ON_ENABLE 0x8
+#define DISABLE_VOLTAGE 0x0
+#define QUICK_STOP 0X2
+#define FAULT_RESET 0X80 
+
 
 struct sched_param schedp;
-=======
-/* INIT=sincronizzazione e apertura della mailbox
- * PRE_OP=scambio di SDO via mailbox per settare i PDO e altri valori di default
- * SAFE_OP=apertura collegamento EtherCAT con scambio di PDO
- * OP=scambio di dati consentito sia via mailbox sia via EtherCAT (sincrono e asincrono) */
-
-/*porta di sopra=eno1
-  porta sotto=enp2s0*/
-
 char IOmap[4096];
 pthread_t thread1, thread2;
 struct timeval tv, t1, t2;
@@ -47,6 +55,8 @@ boolean needlf;
 volatile int wkc;
 boolean inOP;
 uint8 currentgroup = 0;
+uint8 *dataptr;
+uint16 statusword;
 
 /* INIT=sincronizzazione e apertura della mailbox
  * PRE_OP=scambio di SDO via mailbox per settare i PDO e altri valori di default
@@ -66,22 +76,26 @@ typedef struct
       
 } OBentry;
 
-void to_operation_enabled(uint16 slave){
-	 
-	OBentry controlword={0x6040, 0x00, sizeof(uint16),0}; //comando per eseguire transizioni
-    OBentry statusword={0x6041, 0x00, sizeof(uint16),0}; //elemento che rappresenta lo stato
-    
-    
-		
-	
-		
-		
-     printf("statusword non letta\n");
-    
-    
-	
-	
-	}
+typedef struct PACKED
+{		
+	    uint16 controlword;
+        int32 target_position;
+      
+} in_EPOSt;
+
+in_EPOSt  * in_EPOS;
+
+//struttra che rappresenta le uscite dell'EPOS
+typedef struct PACKED
+{
+        int32 position_actual_value;
+        int32 velocity_actual_value;
+        int16 torque_actual_value;
+        uint16 statusword;
+      
+} out_EPOSt;
+
+out_EPOSt * out_EPOS;
 
 void CSP_PDO_mapping(uint16 slave){
 	
@@ -107,17 +121,11 @@ void CSP_PDO_mapping(uint16 slave){
 	//0x607A=taget_position_index, 0x00=target_position_subindex, 0x20=taget_position_bitlength
 	OBentry RxPDO2={0x1600,0x02,sizeof(uint32),0x607A0020}; 
 	retval=ec_SDOwrite(slave,RxPDO2.index,RxPDO2.sub_index,FALSE,RxPDO2.size,&(RxPDO2.value),EC_TIMEOUTSAFE);
-
-	//il primo elemento è lasciato alla controword che è già impostata di default
-	//secondo elemento mappato
-	//0x607A=taget_position_index, 0x00=target_position_subindex, 0x20=taget_position_bitlength
-	OBentry RxPDO1={0x1600,0x02,sizeof(uint32),0x607A0020}; 
-	retval=ec_SDOwrite(slave,RxPDO1.index,RxPDO1.sub_index,FALSE,RxPDO1.size,&(RxPDO1.value),EC_TIMEOUTSAFE);
 	if(retval<0) printf("Scrittura fallita\n");
 	else RxPDOs_number++;
 	
 	//comunico il numero di oggetti mappati
-	RxPDOs_mapped.value=RxPDOs_number+1;
+	RxPDOs_mapped.value=RxPDOs_number;
 	retval=ec_SDOwrite(slave,RxPDOs_mapped.index,RxPDOs_mapped.sub_index,FALSE, RxPDOs_mapped.size,&(RxPDOs_mapped.value),
 	EC_TIMEOUTSAFE);
 	if(retval<0) printf("Scrittura fallita\n");
@@ -215,6 +223,7 @@ int CSP_EPOSsetup(uint16 slave)
     OBentry max_current={0x3001, 0x02, sizeof(uint32),(uint32)(2*nominal_current.value)}; //corrente massima del motore in mA 
     OBentry thermal_time_constant_winding={0x3001, 0x04, sizeof(uint16),(uint16)33}; //costante di tempo termica di avvolgimento in 0.1s
     OBentry torque_costant={0x3001, 0x05, sizeof(uint32),(uint32)24300}; //costante di coppia in uNm/A
+    OBentry statusword2={0x6041, 0x00, sizeof(uint16),0}; //elemento che rappresenta lo stato
    
     //parametri da settare
     int8_t mode_prova;
@@ -223,6 +232,7 @@ int CSP_EPOSsetup(uint16 slave)
     uint32 max_current_prova;
     uint16 thermal_time_constant_winding_prova;
     uint16 torque_costant_prova;
+    uint16 statusword2_prova;
     
     /* non settabili o corretti di default
     int32_t position_offset_prova;
@@ -284,6 +294,10 @@ int CSP_EPOSsetup(uint16 slave)
 	&torque_costant_prova, EC_TIMEOUTSAFE);
 	printf("torque_costant=%u,letti=%d, esito=%d\n",torque_costant_prova,torque_costant.size, retval);
 	
+	retval=ec_SDOread(slave, statusword2.index, statusword2.sub_index, FALSE, &(statusword2.size), 
+	&statusword2_prova, EC_TIMEOUTSAFE);
+	printf("statusword2=%x,letti=%d, esito=%d\n",statusword2_prova,statusword2.size, retval);
+	
 	/*retval=ec_SDOread(slave, 0x3000, 0x05, FALSE, &length32, &main_sensor_resolution_prova, EC_TIMEOUTSAFE);
 	printf("risoluzione=%u,letti=%d, esito=%d\n",main_sensor_resolution_prova,length32,retval);
 	
@@ -311,7 +325,18 @@ int CSP_EPOSsetup(uint16 slave)
 
 }
 
-
+void to_operation_enabled(uint16 slave){
+	 
+	OBentry controlword={0x6040, 0x00, sizeof(uint16),0}; //comando per eseguire transizioni
+    OBentry statusword={0x6041, 0x00, sizeof(uint16),0}; //elemento che rappresenta lo stato
+    
+  
+    
+    
+	
+	
+	}
+	
 void redtest(char *ifname)
 {
    int cnt, i, j, oloop, iloop;
@@ -337,18 +362,19 @@ void redtest(char *ifname)
          ec_configdc();
          ec_config_map(&IOmap);
         
-
-         /* read indevidual slave state and store in ec_slave[] */
+        out_EPOS = (out_EPOSt*) ec_slave[1].outputs;
+        //in_EPOS = (in_EPOSt*) ec_slave[1].inputs;
+        dataptr=ec_slave[1].inputs;
+        
+        /* read indevidual slave state and store in ec_slave[] */
          ec_readstate();
          for(cnt = 1; cnt <= ec_slavecount ; cnt++)
          {
             printf("Slave:%d Name:%s Output size:%3dbits Input size:%3dbits State:%2d delay:%d.%d\n",
                   cnt, ec_slave[cnt].name, ec_slave[cnt].Obits, ec_slave[cnt].Ibits,
                   ec_slave[cnt].state, (int)ec_slave[cnt].pdelay, ec_slave[cnt].hasdc);
-            printf("         Out:%8.8x,%4d In:%8.8x,%4d\n",
-                  (int)ec_slave[cnt].outputs, ec_slave[cnt].Obytes, (int)ec_slave[cnt].inputs, ec_slave[cnt].Ibytes);
-           
-         }
+          }
+          
          expectedWKC = (ec_group[0].outputsWKC * 2) + ec_group[0].inputsWKC;
          printf("Calculated workcounter %d\n", expectedWKC);
          
@@ -364,33 +390,20 @@ void redtest(char *ifname)
          dorun = 1;
          /* wait for all slaves to reach OP state */
          ec_statecheck(0, EC_STATE_OPERATIONAL,  5 * EC_TIMEOUTSTATE);
-         oloop = ec_slave[0].Obytes;
-         if ((oloop == 0) && (ec_slave[0].Obits > 0)) oloop = 1;
-         if (oloop > 8) oloop = 8;
-         iloop = ec_slave[0].Ibytes;
-         if ((iloop == 0) && (ec_slave[0].Ibits > 0)) iloop = 1;
-         if (iloop > 8) iloop = 8;
+        
          if (ec_slave[0].state == EC_STATE_OPERATIONAL )
          {
             printf("Operational state reached for all slaves.\n");
             inOP = TRUE;
-            /* acyclic loop 5000 x 2ms = 10s */
+            /* acyclic loop 5000 x 1ms = 5s */
             for(i = 1; i <= 5000; i++)
             {
-               printf(" PDO n. %d Wck %3d, DCtime %12lld, cycle1=%ld, cycle2=%d O:",
-                  dorun,wkc , ec_DCtime, cycle,ec_slave[1].DCcycle);
-               for(j = 0 ; j < oloop; j++)
-               {
-                  printf(" %2.2x", *(ec_slave[0].outputs + j));
-               }
-               printf(" I:");
-               for(j = 0 ; j < iloop; j++)
-               {
-                  printf(" %2.2x", *(ec_slave[0].inputs + j));
-               }
-               printf("\r");
+               printf("PDO n.%d,statusword=%x,cycle1=%ld,cycle2=%d \n",
+                  dorun,/*in_EPOS->controlword , out_EPOS->*/statusword, cycle,ec_slave[1].DCcycle);
+               
+               
                fflush(stdout);
-               osal_usleep(2000);
+               osal_usleep(1000);
             }
             dorun = 0;
             inOP = FALSE;
@@ -450,11 +463,7 @@ void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime)
    static int64 integral = 0;
    int64 delta;
    /* set linux sync point 50us later than DC sync, just as example */
-
-   delta = (reftime-50000) % cycletime;
-
-   delta = (reftime ) % cycletime;
-
+   delta = (reftime) % cycletime;
    if(delta> (cycletime / 2)) { delta= delta - cycletime; }
    if(delta>0){ integral++; }
    if(delta<0){ integral--; }
@@ -462,6 +471,16 @@ void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime)
    gl_delta = delta;
 }
 
+void Servo_state_machine(){
+	
+	
+	
+	
+	
+	
+	
+	}
+	
 /* RT EtherCAT thread */
 OSAL_THREAD_FUNC_RT ecatthread()
 {
@@ -479,9 +498,17 @@ OSAL_THREAD_FUNC_RT ecatthread()
    dorun = 0;
    ec_send_processdata();
    
+   /* eseguo il pinning della pagine attuali e future occupate dal thread per garantire
+        prevedibilità nelle prestazioni real-time */
+   if(mlockall(MCL_CURRENT|MCL_FUTURE) == -1){
+         printf("mlockall failed: %m\n");
+         pthread_cancel(pthread_self());
+        }
+        
    while(1)
    {
-	   time1=ec_DCtime;
+	  
+	  time1=ec_DCtime;
       /* calculate next cycle start */
       add_timespec(&ts, cycletime + toff);
       /* wait to cycle start */
@@ -491,12 +518,14 @@ OSAL_THREAD_FUNC_RT ecatthread()
          wkc = ec_receive_processdata(EC_TIMEOUTRET);
 
          dorun++;
-
+         
          if (ec_slave[0].hasdc)
          {
             /* calulate toff to get linux time and DC synced */
             ec_sync(ec_DCtime, cycletime, &toff);
          }
+
+		 Servo_state_machine();
          ec_send_processdata();
          time2=ec_DCtime;
          cycle=time2-time1;
@@ -506,7 +535,7 @@ OSAL_THREAD_FUNC_RT ecatthread()
    }
 }
 
-OSAL_THREAD_FUNC ecatcheck( void *ptr )
+OSAL_THREAD_FUNC ecatcheck(  )
 {
     int slave;
 
@@ -586,8 +615,7 @@ OSAL_THREAD_FUNC ecatcheck( void *ptr )
 
 int main(int argc, char *argv[])
 {
-   int ctime;
-
+  
    printf("SOEM (Simple Open EtherCAT Master)\nRedundancy test\n");
 
    if (argc > 0)
@@ -603,6 +631,7 @@ int main(int argc, char *argv[])
 
       /* start acyclic part */
       redtest(argv[1]);
+     
    }
    else
    {
