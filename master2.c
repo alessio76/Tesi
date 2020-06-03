@@ -1,3 +1,5 @@
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/time.h>
@@ -7,8 +9,8 @@
 #include <sys/time.h>
 #include <time.h>
 #include <pthread.h>
-#include <sys/mman.h>
 #include <math.h>
+
 #include "ethercat.h"
 
 #define NSEC_PER_SEC 1000000000
@@ -18,6 +20,24 @@
 #define EPOS4 1 
 #define DELAY 0
 
+struct sched_param schedp;
+char IOmap[4096];
+pthread_t thread1, thread2;
+struct timeval tv, t1, t2;
+int dorun = 0;
+int deltat, tmax = 0;
+int64 toff, gl_delta;
+int DCdiff;
+uint8 *digout = 0;
+int expectedWKC;
+long int time1;
+long int time2;
+long int cycle;
+boolean needlf;
+volatile int wkc;
+boolean inOP;
+uint8 currentgroup = 0;
+
 /* INIT=sincronizzazione e apertura della mailbox
  * PRE_OP=scambio di SDO via mailbox per settare i PDO e altri valori di default
  * SAFE_OP=apertura collegamento EtherCAT con scambio di PDO
@@ -25,38 +45,6 @@
 
 /*porta di sopra=eno1
   porta sotto=enp2s0*/
-
-char IOmap[4096];
-pthread_t thread_RT, thread_error;
-struct timeval tv, t1, t2;
-int dorun = 0;
-int deltat, tmax = 0;
-int64 toff, gl_delta;
-//int DCdiff;
-int expectedWKC;
-boolean needlf;
-volatile int wkc;
-boolean inOP;
-uint8 currentgroup = 0;
-
-typedef struct
-{
-        int32 target_position;
-      
-} in_EPOSt;
-in_EPOSt  * in_EPOS;
-
-//struttra che rappresenta le uscite dell'EPOS
-typedef struct
-{
-        int32 position_actual_value;
-        int32 velocity_actual_value;
-        int16 torque_actual_value;
-        int16 statusword;
-      
-} out_EPOSt;
-
-out_EPOSt * out_EPOS;
 
 //struttura ceh rappresenta le entry dell'Object Dictionary
 typedef struct 
@@ -82,9 +70,16 @@ void CSP_PDO_mapping(uint16 slave){
 	if(retval<0) printf("Scrittura fallita\n");
 	
 	//primo elemento mappato
+	//0x6040=controlword_index, 0x00=controlword_subindex, 0x10=controlword_bitlength
+	OBentry RxPDO1={0x1600,0x01,sizeof(uint32),0x60400010};
+	retval=ec_SDOwrite(slave,RxPDO1.index,RxPDO1.sub_index,FALSE, RxPDO1.size,&(RxPDO1.value),EC_TIMEOUTSAFE);
+	if(retval<0) printf("Scrittura fallita\n");
+	else RxPDOs_number++;
+	
+	//secondo elemento mappato
 	//0x607A=taget_position_index, 0x00=target_position_subindex, 0x20=taget_position_bitlength
-	OBentry RxPDO1={0x1600,0x01,sizeof(uint32),0x607A0020}; 
-	retval=ec_SDOwrite(slave,RxPDO1.index,RxPDO1.sub_index,FALSE,RxPDO1.size,&(RxPDO1.value),EC_TIMEOUTSAFE);
+	OBentry RxPDO2={0x1600,0x02,sizeof(uint32),0x607A0020}; 
+	retval=ec_SDOwrite(slave,RxPDO2.index,RxPDO2.sub_index,FALSE,RxPDO2.size,&(RxPDO2.value),EC_TIMEOUTSAFE);
 	if(retval<0) printf("Scrittura fallita\n");
 	else RxPDOs_number++;
 	
@@ -172,6 +167,8 @@ void CSP_PDO_mapping(uint16 slave){
 	retval=ec_SDOwrite(slave,SM3PDOs_mapped.index,SM3PDOs_mapped.sub_index,FALSE, SM3PDOs_mapped.size,&(SM3PDOs_mapped.value),
 	EC_TIMEOUTSAFE);
 	if(retval<0) printf("Scrittura fallita\n");
+	
+	ec_dcsync0(EPOS4,TRUE,DEADLINE,5000);
 	
 	}
 
@@ -278,41 +275,35 @@ int CSP_EPOSsetup(uint16 slave)
 	//mappo i PDO
     CSP_PDO_mapping(EPOS4);
 	return 1;
+
 }
+
 
 void redtest(char *ifname)
 {
-   int cnt, i, j, oloop, iloop,state ;
+   int cnt, i, j, oloop, iloop;
+
    printf("Starting Redundant test\n");
 
    /* initialise SOEM, bind socket to ifname */
-   if (ec_init(ifname)) 
+   if (ec_init(ifname))
    {
       printf("ec_init on %s succeeded.\n",ifname);
       /* find and auto-config slaves */
       if ( ec_config_init(FALSE) > 0 )
       {
-		  printf("%d slaves found and configured.\n",ec_slavecount);
-		  
-		 //impongo PRE_OP poichè è l'unico stato in cui posso mappare i PDO
-         ec_slave[0].state = EC_STATE_PRE_OP;
+         printf("%d slaves found and configured.\n",ec_slavecount);
+         /* wait for all slaves to reach PRE_OP state */
+		 ec_slave[0].state = EC_STATE_PRE_OP;
 		 ec_writestate (0);
-		 state=ec_statecheck(0, EC_STATE_PRE_OP, EC_TIMEOUTSTATE*4);
+		 ec_statecheck(0, EC_STATE_PRE_OP, EC_TIMEOUTSTATE*4);
 		 
-		  /* configure DC options for every DC capable slave found in the list */
+		 ec_slave[EPOS4].PO2SOconfig = CSP_EPOSsetup; 
+
+         /* configure DC options for every DC capable slave found in the list */
          ec_configdc();
-         
-		 /* EPOS setup */
-          ec_slave[EPOS4].PO2SOconfig = CSP_EPOSsetup; 
-         
-        //mappo i PDO degli slave nel mio buffer locale
-         if(ec_config_map(&IOmap) < 0) printf("Mappaggio fallito\n");
-         
-         //aspetto che tutti gli slave si portino in SAFE_OP
-         ec_slave[0].state = EC_STATE_SAFE_OP ;
-		 ec_writestate (0);
-         state=ec_statecheck(0, EC_STATE_SAFE_OP,  EC_TIMEOUTSTATE * 4);
-         printf("Stato attuale=%d\n",state);
+         ec_config_map(&IOmap);
+        
 
          /* read indevidual slave state and store in ec_slave[] */
          ec_readstate();
@@ -327,6 +318,10 @@ void redtest(char *ifname)
          }
          expectedWKC = (ec_group[0].outputsWKC * 2) + ec_group[0].inputsWKC;
          printf("Calculated workcounter %d\n", expectedWKC);
+         
+         ec_slave[0].state = EC_STATE_SAFE_OP;
+		 ec_writestate (0);
+		 ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE*4);
 
          printf("Request operational state for all slaves\n");
          ec_slave[0].state = EC_STATE_OPERATIONAL;
@@ -346,11 +341,11 @@ void redtest(char *ifname)
          {
             printf("Operational state reached for all slaves.\n");
             inOP = TRUE;
-            /* acyclic loop 5000 x 20ms = 10s */
+            /* acyclic loop 5000 x 2ms = 10s */
             for(i = 1; i <= 5000; i++)
             {
-               printf("Processdata cycle %5d , Wck %3d, DCtime %12ld, dt %12ld, O:",
-                  dorun, wkc , ec_DCtime, gl_delta);
+               printf(" PDO n. %d Wck %3d, DCtime %12lld, cycle1=%ld, cycle2=%d O:",
+                  dorun,wkc , ec_DCtime, cycle,ec_slave[1].DCcycle);
                for(j = 0 ; j < oloop; j++)
                {
                   printf(" %2.2x", *(ec_slave[0].outputs + j));
@@ -362,7 +357,7 @@ void redtest(char *ifname)
                }
                printf("\r");
                fflush(stdout);
-               osal_usleep(20000);
+               osal_usleep(2000);
             }
             dorun = 0;
             inOP = FALSE;
@@ -422,7 +417,7 @@ void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime)
    static int64 integral = 0;
    int64 delta;
    /* set linux sync point 50us later than DC sync, just as example */
-   delta = (reftime - 50000) % cycletime;
+   delta = (reftime-50000) % cycletime;
    if(delta> (cycletime / 2)) { delta= delta - cycletime; }
    if(delta>0){ integral++; }
    if(delta<0){ integral--; }
@@ -433,51 +428,48 @@ void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime)
 /* RT EtherCAT thread */
 OSAL_THREAD_FUNC_RT ecatthread()
 {
-   struct timespec ts, tleft;
+   struct timespec   ts, tleft;
    int ht;
    int64 cycletime;
    struct sched_attr attr;
    sched_deadline(&attr,RUNTIME,DEADLINE,DEADLINE,0);
-   //sched_fifo(&attr,20,0);
-	
+
    clock_gettime(CLOCK_MONOTONIC, &ts);
    ht = (ts.tv_nsec / 1000000) + 1; /* round to nearest ms */
    ts.tv_nsec = ht * 1000000;
    cycletime = DEADLINE; /* cycletime in ns */
    toff = 0;
    dorun = 0;
+   ec_send_processdata();
    
-     /* eseguo il pinning della pagine attuali e future occupate dal thread per garantire
-        prevedibilità nelle prestazioni real-time */
-     if(mlockall(MCL_CURRENT|MCL_FUTURE) == -1){
-         printf("mlockall failed: %m\n");
-         pthread_cancel(pthread_self());
-        }
-        
    while(1)
    {
+	   time1=ec_DCtime;
       /* calculate next cycle start */
       add_timespec(&ts, cycletime + toff);
       /* wait to cycle start */
       clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
       if (dorun>0)
       {
-		 ec_send_processdata();
          wkc = ec_receive_processdata(EC_TIMEOUTRET);
 
          dorun++;
-         /* if we have some digital output, cycle */
-        if (ec_slave[0].hasdc)
+
+         if (ec_slave[0].hasdc)
          {
             /* calulate toff to get linux time and DC synced */
             ec_sync(ec_DCtime, cycletime, &toff);
          }
+         ec_send_processdata();
+         time2=ec_DCtime;
+         cycle=time2-time1;
+         time1=time2;
          
       }
    }
 }
 
-OSAL_THREAD_FUNC ecatcheck( )
+OSAL_THREAD_FUNC ecatcheck( void *ptr )
 {
     int slave;
 
@@ -557,26 +549,27 @@ OSAL_THREAD_FUNC ecatcheck( )
 
 int main(int argc, char *argv[])
 {
+   int ctime;
 
    printf("SOEM (Simple Open EtherCAT Master)\nRedundancy test\n");
 
-   if (argc > 1)
+   if (argc > 0)
    {
       dorun = 0;
+     
 
       /* create RT thread */
-      //elimare osal_thread_create da un fault
-      osal_thread_create(&thread_RT, stack64k * 2, &ecatthread, NULL);
+      osal_thread_create(&thread1, stack64k * 2, &ecatthread, NULL);
 
       /* create thread to handle slave error handling in OP */
-      osal_thread_create(&thread_error, stack64k * 4, &ecatcheck, NULL);
+      osal_thread_create(&thread2, stack64k * 4, &ecatcheck, NULL);
 
       /* start acyclic part */
       redtest(argv[1]);
    }
    else
    {
-      printf("Usage: red_test ifname1 = eth0 for example\n");
+      printf("Usage: red_test ifname1 ifname2 cycletime\nifname = eth0 for example\ncycletime in us\n");
    }
 
    printf("End program\n");
