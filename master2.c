@@ -20,7 +20,7 @@
 #define EPOS4 1 
 #define DELAY 0
 
-<<<<<<< HEAD
+
 struct sched_param schedp;
 =======
 /* INIT=sincronizzazione e apertura della mailbox
@@ -31,7 +31,6 @@ struct sched_param schedp;
 /*porta di sopra=eno1
   porta sotto=enp2s0*/
 
->>>>>>> c40c0a437bb3e4df4f31ea9685d941ece33e361d
 char IOmap[4096];
 pthread_t thread1, thread2;
 struct timeval tv, t1, t2;
@@ -97,7 +96,6 @@ void CSP_PDO_mapping(uint16 slave){
 	EC_TIMEOUTSAFE);
 	if(retval<0) printf("Scrittura fallita\n");
 	
-<<<<<<< HEAD
 	//primo elemento mappato
 	//0x6040=controlword_index, 0x00=controlword_subindex, 0x10=controlword_bitlength
 	OBentry RxPDO1={0x1600,0x01,sizeof(uint32),0x60400010};
@@ -109,13 +107,12 @@ void CSP_PDO_mapping(uint16 slave){
 	//0x607A=taget_position_index, 0x00=target_position_subindex, 0x20=taget_position_bitlength
 	OBentry RxPDO2={0x1600,0x02,sizeof(uint32),0x607A0020}; 
 	retval=ec_SDOwrite(slave,RxPDO2.index,RxPDO2.sub_index,FALSE,RxPDO2.size,&(RxPDO2.value),EC_TIMEOUTSAFE);
-=======
+
 	//il primo elemento è lasciato alla controword che è già impostata di default
 	//secondo elemento mappato
 	//0x607A=taget_position_index, 0x00=target_position_subindex, 0x20=taget_position_bitlength
 	OBentry RxPDO1={0x1600,0x02,sizeof(uint32),0x607A0020}; 
 	retval=ec_SDOwrite(slave,RxPDO1.index,RxPDO1.sub_index,FALSE,RxPDO1.size,&(RxPDO1.value),EC_TIMEOUTSAFE);
->>>>>>> c40c0a437bb3e4df4f31ea9685d941ece33e361d
 	if(retval<0) printf("Scrittura fallita\n");
 	else RxPDOs_number++;
 	
@@ -453,11 +450,11 @@ void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime)
    static int64 integral = 0;
    int64 delta;
    /* set linux sync point 50us later than DC sync, just as example */
-<<<<<<< HEAD
+
    delta = (reftime-50000) % cycletime;
-=======
+
    delta = (reftime ) % cycletime;
->>>>>>> c40c0a437bb3e4df4f31ea9685d941ece33e361d
+
    if(delta> (cycletime / 2)) { delta= delta - cycletime; }
    if(delta>0){ integral++; }
    if(delta<0){ integral--; }
