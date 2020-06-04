@@ -1,4 +1,3 @@
-
 #include <sys/mman.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,12 +40,9 @@
 struct sched_param schedp;
 char IOmap[4096];
 pthread_t thread1, thread2;
-struct timeval tv, t1, t2;
 int dorun = 0;
 int deltat, tmax = 0;
 int64 toff, gl_delta;
-int DCdiff;
-uint8 *digout = 0;
 int expectedWKC;
 long int time1;
 long int time2;
@@ -81,9 +77,9 @@ typedef struct PACKED
 	    uint16 controlword;
         int32 target_position;
       
-} in_EPOSt;
+} out_EPOSt;
 
-in_EPOSt  * in_EPOS;
+out_EPOSt  * out_EPOS;
 
 //struttra che rappresenta le uscite dell'EPOS
 typedef struct PACKED
@@ -93,9 +89,9 @@ typedef struct PACKED
         int16 torque_actual_value;
         uint16 statusword;
       
-} out_EPOSt;
+} in_EPOSt;
 
-out_EPOSt * out_EPOS;
+in_EPOSt * in_EPOS;
 
 void CSP_PDO_mapping(uint16 slave){
 	
@@ -324,22 +320,10 @@ int CSP_EPOSsetup(uint16 slave)
 	return 1;
 
 }
-
-void to_operation_enabled(uint16 slave){
-	 
-	OBentry controlword={0x6040, 0x00, sizeof(uint16),0}; //comando per eseguire transizioni
-    OBentry statusword={0x6041, 0x00, sizeof(uint16),0}; //elemento che rappresenta lo stato
-    
-  
-    
-    
-	
-	
-	}
 	
 void redtest(char *ifname)
 {
-   int cnt, i, j, oloop, iloop;
+   int cnt,i;
 
    printf("Starting Redundant test\n");
 
@@ -362,9 +346,9 @@ void redtest(char *ifname)
          ec_configdc();
          ec_config_map(&IOmap);
         
-        out_EPOS = (out_EPOSt*) ec_slave[1].outputs;
-        //in_EPOS = (in_EPOSt*) ec_slave[1].inputs;
-        dataptr=ec_slave[1].inputs;
+        out_EPOS = (out_EPOSt*) ec_slave[1].outputs; 
+        in_EPOS = (in_EPOSt*) ec_slave[1].inputs;
+        //dataptr=ec_slave[1].inputs;
         
         /* read indevidual slave state and store in ec_slave[] */
          ec_readstate();
@@ -398,8 +382,10 @@ void redtest(char *ifname)
             /* acyclic loop 5000 x 1ms = 5s */
             for(i = 1; i <= 5000; i++)
             {
-               printf("PDO n.%d,statusword=%x,cycle1=%ld,cycle2=%d \n",
-                  dorun,/*in_EPOS->controlword , out_EPOS->*/statusword, cycle,ec_slave[1].DCcycle);
+               printf("PDO n.%d,wrk=%d,cycle1=%ld,cycle2=%d \n",
+                  dorun,wkc, cycle,ec_slave[1].DCcycle);
+                  
+               printf("statusword %x",in_EPOS->statusword);
                
                
                fflush(stdout);
@@ -496,8 +482,6 @@ OSAL_THREAD_FUNC_RT ecatthread()
    cycletime = DEADLINE; /* cycletime in ns */
    toff = 0;
    dorun = 0;
-   ec_send_processdata();
-   
    /* eseguo il pinning della pagine attuali e future occupate dal thread per garantire
         prevedibilità nelle prestazioni real-time */
    if(mlockall(MCL_CURRENT|MCL_FUTURE) == -1){
@@ -505,6 +489,7 @@ OSAL_THREAD_FUNC_RT ecatthread()
          pthread_cancel(pthread_self());
         }
         
+   ec_send_processdata();
    while(1)
    {
 	  
@@ -525,7 +510,7 @@ OSAL_THREAD_FUNC_RT ecatthread()
             ec_sync(ec_DCtime, cycletime, &toff);
          }
 
-		 Servo_state_machine();
+		 //Servo_state_machine();
          ec_send_processdata();
          time2=ec_DCtime;
          cycle=time2-time1;
