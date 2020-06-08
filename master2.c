@@ -18,6 +18,7 @@
 #define RUNTIME 500000 //runtime assicurato in ns
 #define EPOS4 1 
 #define DELAY 5000
+#define PI 3.141592654
 
 //Stati EPOS state machine
 #define SWITCH_ON_DISABLED 0x40 
@@ -25,6 +26,7 @@
 #define SWITCHED_ON 0x23
 #define OPERATION_ENABLED 0x37 
 #define QUICKSTOP_ACTIVE 0x17
+#define FAULT_REACTION_ACTIVE 0xf
 #define FAULT 0X8
 
 //Comandi EPOS state machine
@@ -34,9 +36,12 @@
 #define DISABLE_VOLTAGE 0x0
 #define QUICK_STOP 0X2
 #define FAULT_RESET 0X80 
+#define STOP 0
+#define MOVE 1
+#define COSTANTE_RIDUZIONE 51
+#define RISOLUZIONE 4000
+#define ANGOLO_GIRO 360
 
-const double inc_to_deg=360/4000;
-struct sched_param schedp;
 char IOmap[4096];
 pthread_t thread1, thread2;
 int dorun = 0;
@@ -50,6 +55,8 @@ boolean needlf;
 volatile int wkc;
 boolean inOP;
 uint8 currentgroup = 0;
+//posizione desiderata in incrementi
+int32 target_position_abs[3500]; 
 
 /* INIT=sincronizzazione e apertura della mailbox
  * PRE_OP=scambio di SDO via mailbox per settare i PDO e altri valori di default
@@ -73,6 +80,7 @@ typedef struct PACKED
 {		
 	    uint16 controlword;
         int32 target_position;
+        int32 position_offset;
       
 } out_EPOSt;
 
@@ -85,6 +93,7 @@ typedef struct PACKED
         int32 velocity_actual_value;
         int16 torque_actual_value;
         uint16 statusword;
+        
       
 } in_EPOSt;
 
@@ -111,9 +120,16 @@ void CSP_PDO_mapping(uint16 slave){
 	else RxPDOs_number++;
 	
 	//secondo elemento mappato
-	//0x607A=taget_position_index, 0x00=target_position_subindex, 0x20=taget_position_bitlength
+	//0x607A=target_position_index, 0x00=target_position_subindex, 0x20=taget_position_bitlength
 	OBentry RxPDO2={0x1600,0x02,sizeof(uint32),0x607A0020}; 
 	retval=ec_SDOwrite(slave,RxPDO2.index,RxPDO2.sub_index,FALSE,RxPDO2.size,&(RxPDO2.value),EC_TIMEOUTSAFE);
+	if(retval<0) printf("Scrittura fallita\n");
+	else RxPDOs_number++;
+	
+	//secondo elemento mappato
+	//0x60B0=position_offset_index, 0x00=position_offset_subindex, 0x20=position_offset_bitlength
+	OBentry RxPDO3={0x1600,0x03,sizeof(uint32),0x60B00020}; 
+	retval=ec_SDOwrite(slave,RxPDO3.index,RxPDO3.sub_index,FALSE,RxPDO3.size,&(RxPDO3.value),EC_TIMEOUTSAFE);
 	if(retval<0) printf("Scrittura fallita\n");
 	else RxPDOs_number++;
 	
@@ -207,8 +223,7 @@ void CSP_PDO_mapping(uint16 slave){
 	}
 
 //mancano i parametri dei controllori e l'errore massimo di inseguimento
-int CSP_EPOSsetup(uint16 slave)
-{
+int CSP_EPOSsetup(uint16 slave){
 	
     OBentry mode={0x6060, 0x00, sizeof(int8_t),(int8_t)8}; //modalità di funzionamento 8=CSP
     OBentry period={0x60C2, 0x01, sizeof(uint8),(uint8)1}; //periodo di interpolazione in ms
@@ -216,6 +231,8 @@ int CSP_EPOSsetup(uint16 slave)
     OBentry max_current={0x3001, 0x02, sizeof(uint32),(uint32)(2*nominal_current.value)}; //corrente massima del motore in mA 
     OBentry thermal_time_constant_winding={0x3001, 0x04, sizeof(uint16),(uint16)33}; //costante di tempo termica di avvolgimento in 0.1s
     OBentry torque_costant={0x3001, 0x05, sizeof(uint32),(uint32)24300}; //costante di coppia in uNm/A
+    OBentry following_error_window={0x6065, 0x00, sizeof(uint32),(uint32)10e6}; 
+    //scostamento max tra riferimento e posizione attuale
     
     //parametri da settare
     int8_t mode_prova;
@@ -224,6 +241,7 @@ int CSP_EPOSsetup(uint16 slave)
     uint32 max_current_prova;
     uint16 thermal_time_constant_winding_prova;
     uint16 torque_costant_prova;
+    uint32 following_error_window_prova;
     
     /* non settabili o corretti di default
     int32_t position_offset_prova;
@@ -260,6 +278,10 @@ int CSP_EPOSsetup(uint16 slave)
     
     retval=ec_SDOwrite(slave, period.index, period.sub_index, FALSE, sizeof(uint8), &(period.value), EC_TIMEOUTSAFE);
     printf("%d\n",retval);
+    
+    retval=ec_SDOwrite(slave, following_error_window.index, following_error_window.sub_index, FALSE, 
+    sizeof(uint32), &(following_error_window.value), EC_TIMEOUTSAFE);
+	printf("%d\n",retval);
 	
     //controllo che i parametri siano impostati correttamente
 	retval=ec_SDOread(slave, 0x6061, mode.sub_index, FALSE, &(mode.size) , &mode_prova, EC_TIMEOUTSAFE);
@@ -284,6 +306,10 @@ int CSP_EPOSsetup(uint16 slave)
 	retval=ec_SDOread(slave, torque_costant.index, torque_costant.sub_index, FALSE, &(torque_costant.size), 
 	&torque_costant_prova, EC_TIMEOUTSAFE);
 	printf("torque_costant=%u,letti=%d, esito=%d\n",torque_costant_prova,torque_costant.size, retval);
+	
+	retval=ec_SDOread(slave, following_error_window.index, following_error_window.sub_index, 
+	FALSE, &(following_error_window.size) , &following_error_window_prova, EC_TIMEOUTSAFE);
+	printf("errore=%d,letti=%d,esito=%d\n",following_error_window_prova,following_error_window.size,retval);
 	
 	/*retval=ec_SDOread(slave, 0x3000, 0x05, FALSE, &length32, &main_sensor_resolution_prova, EC_TIMEOUTSAFE);
 	printf("risoluzione=%u,letti=%d, esito=%d\n",main_sensor_resolution_prova,length32,retval);
@@ -311,9 +337,69 @@ int CSP_EPOSsetup(uint16 slave)
 	return 1;
 
 }
+
+//macchina a stati per Cia 402, parte di motion control
+void Servo_state_machine(int flag,int i){
 	
-void redtest(char *ifname)
-{
+	switch(in_EPOS->statusword & 0xff){
+	
+	    case SWITCH_ON_DISABLED:
+	        if(flag) 
+	            out_EPOS->controlword=SHUTDOWN;
+	        else 
+	            out_EPOS->controlword=DISABLE_VOLTAGE;
+	    break;
+	
+	    case READY_TO_SWITCH_ON:
+	        if(flag)
+	            out_EPOS->controlword=SWITCH_ON;
+	        else 
+	            out_EPOS->controlword=DISABLE_VOLTAGE;
+	    break;
+	
+	    case SWITCHED_ON:
+	        if(flag){
+	            out_EPOS->controlword=SWITCH_ON_ENABLE;
+	            out_EPOS->target_position=target_position_abs[i]-out_EPOS->position_offset;
+			}
+	        else 
+	            out_EPOS->controlword=DISABLE_VOLTAGE;
+	    break;
+	    
+	    case OPERATION_ENABLED:
+	        if(flag){
+	            out_EPOS->controlword=SWITCH_ON_ENABLE;
+	            out_EPOS->target_position=target_position_abs[i]-out_EPOS->position_offset;
+			}
+	        else 
+	            out_EPOS->controlword=DISABLE_VOLTAGE;
+	    break;
+	    
+	    case QUICK_STOP:
+	        if(flag){
+	            out_EPOS->controlword=SWITCH_ON;
+	            out_EPOS->target_position=target_position_abs[i]-out_EPOS->position_offset;
+	        }
+	        else 
+	            out_EPOS->controlword=DISABLE_VOLTAGE;
+	    break;
+	
+		case FAULT_REACTION_ACTIVE:
+	        out_EPOS->controlword=FAULT_RESET;
+	    break;
+		
+	    case FAULT:
+	        out_EPOS->controlword=FAULT_RESET;
+	    break;
+	
+	    default:
+	        printf("%x",in_EPOS->statusword);
+	    break;
+	    
+	}
+}
+	
+void redtest(char *ifname){
    int cnt,i;
 
    printf("Starting Redundant test\n");
@@ -340,7 +426,7 @@ void redtest(char *ifname)
         out_EPOS = (out_EPOSt*) ec_slave[1].outputs; //output del master
         in_EPOS = (in_EPOSt*) ec_slave[1].inputs;  //input del master
         
-        /* read indevidual slave state and store in ec_slave[] */
+        /* read individual slave state and store in ec_slave[] */
          ec_readstate();
          for(cnt = 1; cnt <= ec_slavecount ; cnt++)
          {
@@ -370,10 +456,10 @@ void redtest(char *ifname)
             printf("Operational state reached for all slaves.\n");
             inOP = TRUE;
             /* acyclic loop 5000 x 1ms = 5s */
-            for(i = 1; i <= 5000; i++)
+            for(i = 1; i <= 3000; i++)
             {
-               printf("PDO n.%d,wrk=%d,cycle1=%ld,cycle2=%d \n",
-                  dorun,wkc, cycle,ec_slave[1].DCcycle);
+               printf("PDO n.%d,position_offset=%d,cycle1=%ld,cycle2=%d \n",
+                  dorun, out_EPOS->position_offset,cycle,ec_slave[1].DCcycle);
                   
                printf("statusword %x,controword %x, position_actual_value %d",
                in_EPOS->statusword,out_EPOS->controlword,in_EPOS->position_actual_value);
@@ -398,10 +484,14 @@ void redtest(char *ifname)
                  }
              }
          }
-         printf("Request safe operational state for all slaves\n");
-         ec_slave[0].state = EC_STATE_SAFE_OP;
+         Servo_state_machine(STOP,6);
+         ec_send_processdata();
+         wkc = ec_receive_processdata(EC_TIMEOUTRET);
+         printf("Request init state for all slaves, wkc=%d\n");
+         ec_slave[0].state = EC_STATE_INIT;
          /* request SAFE_OP state for all slaves */
          ec_writestate(0);
+         ec_statecheck(0, EC_STATE_INIT,  5 * EC_TIMEOUTSTATE);
       }
       else
       {
@@ -418,8 +508,7 @@ void redtest(char *ifname)
 }
 
 /* add ns to timespec */
-void add_timespec(struct timespec *ts, int64 addtime)
-{
+void add_timespec(struct timespec *ts, int64 addtime){
    int64 sec, nsec;
 
    nsec = addtime % NSEC_PER_SEC;
@@ -435,8 +524,7 @@ void add_timespec(struct timespec *ts, int64 addtime)
 }
 
 /* PI calculation to get linux time synced to DC time */
-void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime)
-{
+void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime){
    static int64 integral = 0;
    int64 delta;
    /* set linux sync point 50us later than DC sync, just as example */
@@ -448,65 +536,15 @@ void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime)
    gl_delta = delta;
 }
 
-//macchina a stati per Cia 402, parte di motion control
-void Servo_state_machine(uint8 statusword_lower_byte,int flag){
-	
-	switch(statusword_lower_byte){
-	
-	    case SWITCH_ON_DISABLED:
-	        if(flag) 
-	            out_EPOS->controlword=SHUTDOWN;
-	    break;
-	
-	    case READY_TO_SWITCH_ON:
-	        if(flag)
-	            out_EPOS->controlword=SWITCH_ON;
-	        else 
-	            out_EPOS->controlword=DISABLE_VOLTAGE;
-	    break;
-	
-	    case SWITCHED_ON:
-	        if(flag)
-	            out_EPOS->controlword=SWITCH_ON_ENABLE;
-	        else 
-	            out_EPOS->controlword=DISABLE_VOLTAGE;
-	    break;
-	    
-	    case OPERATION_ENABLED:
-	        if(flag)
-	            out_EPOS->controlword=SWITCH_ON;
-	        else 
-	            out_EPOS->controlword=DISABLE_VOLTAGE;
-	    break;
-	    
-	    case QUICK_STOP:
-	        if(flag)
-	            out_EPOS->controlword=SWITCH_ON;
-	        else 
-	            out_EPOS->controlword=DISABLE_VOLTAGE;
-	    break;
-	
-	    case FAULT:
-	        out_EPOS->controlword=FAULT_RESET;
-	    break;
-	
-	    
-	   
-	    default:
-	        printf("%x",statusword_lower_byte);
-	    break;
-	    
-	}
-}
 	
 /* RT EtherCAT thread */
-OSAL_THREAD_FUNC ecatthread()
-{
+OSAL_THREAD_FUNC ecatthread(){
    struct timespec   ts, tleft;
    int ht;
    int64 cycletime;
    struct sched_attr attr;
    sched_deadline(&attr,RUNTIME,DEADLINE,DEADLINE,0);
+   int j=0;
 
    clock_gettime(CLOCK_MONOTONIC, &ts);
    ht = (ts.tv_nsec / 1000000) + 1; /* round to nearest ms */
@@ -541,20 +579,18 @@ OSAL_THREAD_FUNC ecatthread()
             /* calulate toff to get linux time and DC synced */
             ec_sync(ec_DCtime, cycletime, &toff);
          }
-	     //Servo_state_machine((out_EPOS->statusword & 0xff),1);
+	     Servo_state_machine(MOVE,j);
          ec_send_processdata();
+         out_EPOS->position_offset=in_EPOS->position_actual_value;
          time2=ec_DCtime;
          cycle=time2-time1;
          time1=time2;
          
       }
    }
-   
-    //Servo_state_machine((out_EPOS->statusword & 0xff),0);
 }
 
-OSAL_THREAD_FUNC ecatcheck(  )
-{
+OSAL_THREAD_FUNC ecatcheck(){
     int slave;
 
     while(1)
@@ -631,8 +667,7 @@ OSAL_THREAD_FUNC ecatcheck(  )
 
 #define stack64k (64 * 1024)
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]){
   
    printf("SOEM (Simple Open EtherCAT Master)\nRedundancy test\n");
 
@@ -640,7 +675,8 @@ int main(int argc, char *argv[])
    {
       dorun = 0;
      
-
+	   for(int i=0;i<3500;i++)
+			target_position_abs[i]=(int32)(sin(2*PI*i));
       /* create RT thread */
       osal_thread_create(&thread1, stack64k * 2, &ecatthread, NULL);
 
@@ -649,11 +685,12 @@ int main(int argc, char *argv[])
 
       /* start acyclic part */
       redtest(argv[1]);
+      out_EPOS->position_offset=0;
      
    }
    else
    {
-      printf("Usage: red_test ifname1 ifname2 cycletime\nifname = eth0 for example\ncycletime in us\n");
+      printf("Usage: red_test ifname2 cycletime\nifname = eth0 for example\ncycletime in us\n");
    }
 
    printf("End program\n");
