@@ -13,12 +13,16 @@
 #include "ethercat.h"
 
 #define NSEC_PER_SEC 1000000000
+#define MSEC_PER_SEC 1000
 #define EC_TIMEOUTMON 500
 #define DEADLINE 1000000 //deadline in ns
 #define RUNTIME 500000 //runtime assicurato in ns
 #define EPOS4 1 
 #define DELAY 5000
 #define PI 3.141592654
+#define CAMPIONI 50000
+#define PASSO 0.0001
+#define AMPIEZZA 180
 
 //Stati EPOS state machine
 #define SWITCH_ON_DISABLED 0x40 
@@ -26,7 +30,7 @@
 #define SWITCHED_ON 0x23
 #define OPERATION_ENABLED 0x37 
 #define QUICKSTOP_ACTIVE 0x17
-#define FAULT_REACTION_ACTIVE 0xf
+#define FAULT_REACTION_ACTIVE 0x1f
 #define FAULT 0X8
 
 //Comandi EPOS state machine
@@ -41,9 +45,11 @@
 #define COSTANTE_RIDUZIONE 51
 #define RISOLUZIONE 4000
 #define ANGOLO_GIRO 360
-
+ 
+const double deg_1=((double)ANGOLO_GIRO/((double)RISOLUZIONE*(double)COSTANTE_RIDUZIONE)); 
+//rappresenta un incremento in gradi 
 char IOmap[4096];
-pthread_t thread1, thread2;
+pthread_t thread1, thread2,thread3;
 int dorun = 0;
 int deltat, tmax = 0;
 int64 toff, gl_delta;
@@ -56,7 +62,11 @@ volatile int wkc;
 boolean inOP;
 uint8 currentgroup = 0;
 //posizione desiderata in incrementi
-int32 target_position_abs[3500]; 
+int32 target_position_abs[CAMPIONI]; 
+int32 position_offset;
+int misure[CAMPIONI];
+long int prova1;
+long int prova2;
 
 /* INIT=sincronizzazione e apertura della mailbox
  * PRE_OP=scambio di SDO via mailbox per settare i PDO e altri valori di default
@@ -76,6 +86,8 @@ typedef struct
       
 } OBentry;
 
+
+//struttura che rappresenta gli ingressi dell'EPOS
 typedef struct PACKED
 {		
 	    uint16 controlword;
@@ -94,10 +106,23 @@ typedef struct PACKED
         int16 torque_actual_value;
         uint16 statusword;
         
-      
 } in_EPOSt;
 
 in_EPOSt * in_EPOS;
+
+int deg_to_inc(double deg){
+	
+	int32 temp=(int32)(deg/deg_1);
+	return temp;
+	
+	}
+
+double inc_to_deg(int inc){
+	
+	double temp=((double)inc*deg_1);
+	return temp;
+	
+	}
 
 void CSP_PDO_mapping(uint16 slave){
 	
@@ -233,6 +258,7 @@ int CSP_EPOSsetup(uint16 slave){
     OBentry torque_costant={0x3001, 0x05, sizeof(uint32),(uint32)24300}; //costante di coppia in uNm/A
     OBentry following_error_window={0x6065, 0x00, sizeof(uint32),(uint32)10e6}; 
     //scostamento max tra riferimento e posizione attuale
+    OBentry actual_position={0x6064, 0x00, sizeof(int32),(int32)0}; 
     
     //parametri da settare
     int8_t mode_prova;
@@ -311,6 +337,10 @@ int CSP_EPOSsetup(uint16 slave){
 	FALSE, &(following_error_window.size) , &following_error_window_prova, EC_TIMEOUTSAFE);
 	printf("errore=%d,letti=%d,esito=%d\n",following_error_window_prova,following_error_window.size,retval);
 	
+	retval=ec_SDOread(slave, actual_position.index, actual_position.sub_index, 
+	FALSE, &(actual_position.size) , &position_offset, EC_TIMEOUTSAFE);
+	printf("offset=%d,letti=%d,esito=%d\n",position_offset,actual_position.size,retval);
+	
 	/*retval=ec_SDOread(slave, 0x3000, 0x05, FALSE, &length32, &main_sensor_resolution_prova, EC_TIMEOUTSAFE);
 	printf("risoluzione=%u,letti=%d, esito=%d\n",main_sensor_resolution_prova,length32,retval);
 	
@@ -339,7 +369,7 @@ int CSP_EPOSsetup(uint16 slave){
 }
 
 //macchina a stati per Cia 402, parte di motion control
-void Servo_state_machine(int flag,int i){
+int Servo_state_machine(int flag){
 	
 	switch(in_EPOS->statusword & 0xff){
 	
@@ -348,6 +378,8 @@ void Servo_state_machine(int flag,int i){
 	            out_EPOS->controlword=SHUTDOWN;
 	        else 
 	            out_EPOS->controlword=DISABLE_VOLTAGE;
+	            
+	        return 0;
 	    break;
 	
 	    case READY_TO_SWITCH_ON:
@@ -355,51 +387,65 @@ void Servo_state_machine(int flag,int i){
 	            out_EPOS->controlword=SWITCH_ON;
 	        else 
 	            out_EPOS->controlword=DISABLE_VOLTAGE;
+	            
+	        return 0;
 	    break;
 	
 	    case SWITCHED_ON:
 	        if(flag){
 	            out_EPOS->controlword=SWITCH_ON_ENABLE;
-	            out_EPOS->target_position=target_position_abs[i]-out_EPOS->position_offset;
-			}
-	        else 
+					return 1;
+				}
+				
+	        else {
 	            out_EPOS->controlword=DISABLE_VOLTAGE;
+	            return 0;
+			}
 	    break;
 	    
 	    case OPERATION_ENABLED:
 	        if(flag){
 	            out_EPOS->controlword=SWITCH_ON_ENABLE;
-	            out_EPOS->target_position=target_position_abs[i]-out_EPOS->position_offset;
-			}
-	        else 
+					return 1;
+				}
+	        else {
 	            out_EPOS->controlword=DISABLE_VOLTAGE;
+	            return 0;
+			}
 	    break;
 	    
 	    case QUICK_STOP:
 	        if(flag){
 	            out_EPOS->controlword=SWITCH_ON;
-	            out_EPOS->target_position=target_position_abs[i]-out_EPOS->position_offset;
+	           return 1;
 	        }
-	        else 
+	        else {
 	            out_EPOS->controlword=DISABLE_VOLTAGE;
+	            return 0; 
+			}
+			
 	    break;
 	
-		case FAULT_REACTION_ACTIVE:
+		/*case FAULT_REACTION_ACTIVE:
 	        out_EPOS->controlword=FAULT_RESET;
+	        return 0; 
 	    break;
 		
 	    case FAULT:
 	        out_EPOS->controlword=FAULT_RESET;
-	    break;
+	        return 0; 
+	    break;*/
 	
 	    default:
 	        printf("%x",in_EPOS->statusword);
+	        return 0; 
 	    break;
 	    
 	}
 }
 	
-void redtest(char *ifname){
+	  
+OSAL_THREAD_FUNC redtest(char *ifname){
    int cnt,i;
 
    printf("Starting Redundant test\n");
@@ -425,6 +471,8 @@ void redtest(char *ifname){
         
         out_EPOS = (out_EPOSt*) ec_slave[1].outputs; //output del master
         in_EPOS = (in_EPOSt*) ec_slave[1].inputs;  //input del master
+        
+        out_EPOS->position_offset=position_offset;
         
         /* read individual slave state and store in ec_slave[] */
          ec_readstate();
@@ -453,15 +501,15 @@ void redtest(char *ifname){
         
          if (ec_slave[0].state == EC_STATE_OPERATIONAL )
          {
-            printf("Operational state reached for all slaves.\n");
+            printf("Operational state reached for all slaves.Actual state=%d\n",ec_slave[0].state);
             inOP = TRUE;
-            /* acyclic loop 5000 x 1ms = 5s */
-            for(i = 1; i <= 3000; i++)
+            /* acyclic loop */
+            for(i = 1; i <= CAMPIONI; i++)
             {
-               printf("PDO n.%d,position_offset=%d,cycle1=%ld,cycle2=%d \n",
-                  dorun, out_EPOS->position_offset,cycle,ec_slave[1].DCcycle);
+               printf("PDO n.%d,target_position=%d,cycle1=%ld,cycle2=%d \n",
+                  dorun, out_EPOS->target_position,cycle,ec_slave[1].DCcycle);
                   
-               printf("statusword %x,controword %x, position_actual_value %d",
+               printf("statusword %4x,controlword %x, position_actual_value %d",
                in_EPOS->statusword,out_EPOS->controlword,in_EPOS->position_actual_value);
                
                
@@ -484,22 +532,15 @@ void redtest(char *ifname){
                  }
              }
          }
-         Servo_state_machine(STOP,6);
-         ec_send_processdata();
-         wkc = ec_receive_processdata(EC_TIMEOUTRET);
-         printf("Request init state for all slaves, wkc=%d\n");
-         ec_slave[0].state = EC_STATE_INIT;
-         /* request SAFE_OP state for all slaves */
-         ec_writestate(0);
-         ec_statecheck(0, EC_STATE_INIT,  5 * EC_TIMEOUTSTATE);
+         
+         
       }
       else
       {
          printf("No slaves found!\n");
       }
       printf("End redundant test, close socket\n");
-      /* stop SOEM, close socket */
-      ec_close();
+  
    }
    else
    {
@@ -539,12 +580,13 @@ void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime){
 	
 /* RT EtherCAT thread */
 OSAL_THREAD_FUNC ecatthread(){
-   struct timespec   ts, tleft;
+   struct timespec ts, tleft;
    int ht;
    int64 cycletime;
    struct sched_attr attr;
    sched_deadline(&attr,RUNTIME,DEADLINE,DEADLINE,0);
-   int j=0;
+   int i=0;
+   int check;
 
    clock_gettime(CLOCK_MONOTONIC, &ts);
    ht = (ts.tv_nsec / 1000000) + 1; /* round to nearest ms */
@@ -552,6 +594,7 @@ OSAL_THREAD_FUNC ecatthread(){
    cycletime = DEADLINE; /* cycletime in ns */
    toff = 0;
    dorun = 0;
+   
    /* eseguo il pinning della pagine attuali e future occupate dal thread per garantire
         prevedibilità nelle prestazioni real-time */
    if(mlockall(MCL_CURRENT|MCL_FUTURE) == -1){
@@ -560,9 +603,9 @@ OSAL_THREAD_FUNC ecatthread(){
         }
         
    ec_send_processdata();
-   while(1)
+   while(i<CAMPIONI)
    {
-	  
+	  prova1=ec_DCtime;
 	  time1=ec_DCtime;
       /* calculate next cycle start */
       add_timespec(&ts, cycletime + toff);
@@ -571,7 +614,6 @@ OSAL_THREAD_FUNC ecatthread(){
       if (dorun>0)
       {
          wkc = ec_receive_processdata(EC_TIMEOUTRET);
-
          dorun++;
          
          if (ec_slave[0].hasdc)
@@ -579,15 +621,38 @@ OSAL_THREAD_FUNC ecatthread(){
             /* calulate toff to get linux time and DC synced */
             ec_sync(ec_DCtime, cycletime, &toff);
          }
-	     Servo_state_machine(MOVE,j);
+         
+	     check=Servo_state_machine(MOVE);
+	     if(check){
+			 misure[i]=in_EPOS->position_actual_value;
+			 out_EPOS->target_position=target_position_abs[i];
+			 i++;
+		 }
          ec_send_processdata();
-         out_EPOS->position_offset=in_EPOS->position_actual_value;
          time2=ec_DCtime;
          cycle=time2-time1;
          time1=time2;
          
       }
    }
+   
+   add_timespec(&ts, cycletime + toff);
+   clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
+   ec_sync(ec_DCtime, cycletime, &toff); 
+   Servo_state_machine(STOP); //porto il controller nello stato iniziale
+   ec_send_processdata();
+   wkc = ec_receive_processdata(EC_TIMEOUTRET);
+   
+   add_timespec(&ts, cycletime + toff);
+   clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
+   ec_sync(ec_DCtime, cycletime, &toff);
+   ec_slave[0].state = EC_STATE_SAFE_OP;
+   ec_writestate(0);
+   ec_statecheck(0, EC_STATE_SAFE_OP,  5 * EC_TIMEOUTSTATE);
+   ec_dcsync0(EPOS4,FALSE,0,0); //disattivo SYNC0
+   prova2=ec_DCtime;	
+   ec_close();  //chiudo la connessione
+   		
 }
 
 OSAL_THREAD_FUNC ecatcheck(){
@@ -670,30 +735,65 @@ OSAL_THREAD_FUNC ecatcheck(){
 int main(int argc, char *argv[]){
   
    printf("SOEM (Simple Open EtherCAT Master)\nRedundancy test\n");
-
+   
    if (argc > 0)
    {
-      dorun = 0;
+     dorun = 0;
+     double tv[CAMPIONI];
+     double t=0;
+     double f=1;  //frequenza in Hz
      
-	   for(int i=0;i<3500;i++)
-			target_position_abs[i]=(int32)(sin(2*PI*i));
-      /* create RT thread */
-      osal_thread_create(&thread1, stack64k * 2, &ecatthread, NULL);
+	   for(int i=0;i<CAMPIONI;i++){
+		    target_position_abs[i]=deg_to_inc((double)AMPIEZZA*sin(2*PI*f*t));
+		    //target_position_abs[i]=deg_to_inc(AMPIEZZA);
+			tv[i]=t;
+			t+=PASSO; 
+		}
+		
+		
+	/* create RT thread */
+      //osal_thread_create(&thread1, stack64k * 2, &ecatthread, NULL);
 
       /* create thread to handle slave error handling in OP */
-      osal_thread_create(&thread2, stack64k * 4, &ecatcheck, NULL);
+      //osal_thread_create(&thread2, stack64k * 4, &ecatcheck, NULL);
 
-      /* start acyclic part */
-      redtest(argv[1]);
-      out_EPOS->position_offset=0;
-     
-   }
-   else
+      /* start acyclic sudo apt-get install gnuplotx-11part */
+      /*osal_thread_create(&thread3, stack64k * 4, &redtest, argv[1]);
+      pthread_join(thread1,NULL);*/
+      //redtest(argv[1]);
+   
+	printf("%f\n",((double)prova2-prova1)/((double)NSEC_PER_SEC));
+	FILE * fp;
+	
+	fp=fopen("/run/user/1000/gvfs/smb-share/rasprobotics.lab/students/Alterani"
+	,"wt");
+	
+	/*for(int i=0;i<CAMPIONI;i++)
+	       fprintf(fp,"%f %d\n",tv[i],target_position_abs[i]);*/ /*misure[i]*/
+	       
+	 fclose(fp);
+	 /*fp = fopen("comando.txt", "wt"); 
+
+  
+    //scrivo sul file il comando da eseguire 
+   
+  fprintf(fp, "plot \"dati.txt\" with lines\n");
+
+  
+   //chiudo il file su cui ho scritto il comando da eseguire 
+   
+  fclose(fp); 
+
+  
+   eseguo il programma GNUplot passandogli il nome del file che 
+   contiene il comando da eseguire
+   
+  system("gnuplot -persist comando.txt"); */     
+}
+  else
    {
       printf("Usage: red_test ifname2 cycletime\nifname = eth0 for example\ncycletime in us\n");
    }
-
-   printf("End program\n");
-
+ printf("End program\n");
    return (0);
 }
