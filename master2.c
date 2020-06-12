@@ -20,9 +20,10 @@
 #define EPOS4 1 
 #define DELAY 5000
 #define PI 3.141592654
-#define CAMPIONI 50000
+#define CAMPIONI 10000
 #define PASSO 0.0001
 #define AMPIEZZA 180
+#define TRESHOLD 50
 
 //Stati EPOS state machine
 #define SWITCH_ON_DISABLED 0x40 
@@ -62,11 +63,14 @@ volatile int wkc;
 boolean inOP;
 uint8 currentgroup = 0;
 //posizione desiderata in incrementi
-int32 target_position_abs[CAMPIONI]; 
+int32 target_position_abs[2*CAMPIONI]; 
 int32 position_offset;
-int misure[CAMPIONI];
-long int prova1;
-long int prova2;
+int misure[2*CAMPIONI];
+long long int prova1;
+long long int prova2;
+int64 tv[2*CAMPIONI];
+long int cicli[2*CAMPIONI];
+int cont=0;
 
 /* INIT=sincronizzazione e apertura della mailbox
  * PRE_OP=scambio di SDO via mailbox per settare i PDO e altri valori di default
@@ -472,7 +476,6 @@ OSAL_THREAD_FUNC redtest(char *ifname){
         out_EPOS = (out_EPOSt*) ec_slave[1].outputs; //output del master
         in_EPOS = (in_EPOSt*) ec_slave[1].inputs;  //input del master
         
-        out_EPOS->position_offset=position_offset;
         
         /* read individual slave state and store in ec_slave[] */
          ec_readstate();
@@ -504,7 +507,7 @@ OSAL_THREAD_FUNC redtest(char *ifname){
             printf("Operational state reached for all slaves.Actual state=%d\n",ec_slave[0].state);
             inOP = TRUE;
             /* acyclic loop */
-            for(i = 1; i <= CAMPIONI; i++)
+            for(i = 0; i <= CAMPIONI; i++)
             {
                printf("PDO n.%d,target_position=%d,cycle1=%ld,cycle2=%d \n",
                   dorun, out_EPOS->target_position,cycle,ec_slave[1].DCcycle);
@@ -546,6 +549,7 @@ OSAL_THREAD_FUNC redtest(char *ifname){
    {
       printf("No socket connection on %s\nExcecute as root\n",ifname);
    }
+   pthread_join(thread1);
 }
 
 /* add ns to timespec */
@@ -603,7 +607,7 @@ OSAL_THREAD_FUNC ecatthread(){
         }
         
    ec_send_processdata();
-   while(i<CAMPIONI)
+   while(i<=CAMPIONI)
    {
 	  prova1=ec_DCtime;
 	  time1=ec_DCtime;
@@ -623,18 +627,42 @@ OSAL_THREAD_FUNC ecatthread(){
          }
          
 	     check=Servo_state_machine(MOVE);
+	   
 	     if(check){
 			 misure[i]=in_EPOS->position_actual_value;
+			 tv[i]=ec_DCtime;
 			 out_EPOS->target_position=target_position_abs[i];
 			 i++;
 		 }
+		 
          ec_send_processdata();
          time2=ec_DCtime;
          cycle=time2-time1;
+         cicli[i]=cycle;
          time1=time2;
          
       }
    }
+   
+   while((in_EPOS->position_actual_value<=(target_position_abs[CAMPIONI]-TRESHOLD)) || 
+   (in_EPOS->position_actual_value>=(target_position_abs[CAMPIONI]+TRESHOLD))){
+	   
+	     add_timespec(&ts, cycletime + toff);
+		 clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
+	     wkc=ec_receive_processdata(EC_TIMEOUTRET);
+	     ec_sync(ec_DCtime, cycletime, &toff);
+         check=Servo_state_machine(MOVE);
+	   
+	     if(check){
+			 misure[i]=in_EPOS->position_actual_value;
+			 tv[i]=ec_DCtime;
+			 out_EPOS->target_position=target_position_abs[CAMPIONI];
+			 i++;
+		 }
+		 
+         ec_send_processdata();
+	 }
+   
    
    add_timespec(&ts, cycletime + toff);
    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
@@ -652,6 +680,7 @@ OSAL_THREAD_FUNC ecatthread(){
    ec_dcsync0(EPOS4,FALSE,0,0); //disattivo SYNC0
    prova2=ec_DCtime;	
    ec_close();  //chiudo la connessione
+   cont=i;
    		
 }
 
@@ -739,39 +768,41 @@ int main(int argc, char *argv[]){
    if (argc > 0)
    {
      dorun = 0;
-     double tv[CAMPIONI];
+     
      double t=0;
      double f=1;  //frequenza in Hz
      
-	   for(int i=0;i<CAMPIONI;i++){
+	   for(int i=0;i<=CAMPIONI;i++){
 		    target_position_abs[i]=deg_to_inc((double)AMPIEZZA*sin(2*PI*f*t));
 		    //target_position_abs[i]=deg_to_inc(AMPIEZZA);
-			tv[i]=t;
 			t+=PASSO; 
 		}
 		
 		
 	/* create RT thread */
-      //osal_thread_create(&thread1, stack64k * 2, &ecatthread, NULL);
+      osal_thread_create(&thread1, stack64k * 2, &ecatthread, NULL);
 
       /* create thread to handle slave error handling in OP */
-      //osal_thread_create(&thread2, stack64k * 4, &ecatcheck, NULL);
+      osal_thread_create(&thread2, stack64k * 4, &ecatcheck, NULL);
 
-      /* start acyclic sudo apt-get install gnuplotx-11part */
+      /* start acyclic part */
       /*osal_thread_create(&thread3, stack64k * 4, &redtest, argv[1]);
       pthread_join(thread1,NULL);*/
-      //redtest(argv[1]);
+      redtest(argv[1]);
+      
    
-	printf("%f\n",((double)prova2-prova1)/((double)NSEC_PER_SEC));
-	FILE * fp;
+	FILE * fdati/*,*fcicli*/;
 	
-	fp=fopen("/run/user/1000/gvfs/smb-share/rasprobotics.lab/students/Alterani"
-	,"wt");
-	
-	/*for(int i=0;i<CAMPIONI;i++)
-	       fprintf(fp,"%f %d\n",tv[i],target_position_abs[i]);*/ /*misure[i]*/
-	       
-	 fclose(fp);
+	fdati=fopen("dati.txt","wt");
+	//fcicli=fopen("cicli.txt","at");
+	 
+	for(int i=0;i<cont;i++){
+	       fprintf(fdati,"%f %d %d\r\n",((double)(tv[i]-tv[0])/(double)(NSEC_PER_SEC)),misure[i],target_position_abs[i]); 
+	       //fprintf(fcicli,"%f %ld\r\n",((double)(tv[i]-tv[0])/(double)(NSEC_PER_SEC)),cicli[i]); 
+	   }
+	    printf("%d,%d",cont,target_position_abs[CAMPIONI]);   
+	 fclose(fdati);
+	 //fclose(fcicli);
 	 /*fp = fopen("comando.txt", "wt"); 
 
   
@@ -786,9 +817,9 @@ int main(int argc, char *argv[]){
 
   
    eseguo il programma GNUplot passandogli il nome del file che 
-   contiene il comando da eseguire
+   contiene il comando da eseguire*/
    
-  system("gnuplot -persist comando.txt"); */     
+  //system("gnuplot -persist comando.txt");    
 }
   else
    {
