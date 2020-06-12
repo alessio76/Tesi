@@ -449,7 +449,7 @@ int Servo_state_machine(int flag){
 }
 	
 	  
-OSAL_THREAD_FUNC redtest(char *ifname){
+OSAL_THREAD_FUNC CSP_test(char *ifname){
    int cnt,i;
 
    printf("Starting Redundant test\n");
@@ -549,7 +549,7 @@ OSAL_THREAD_FUNC redtest(char *ifname){
    {
       printf("No socket connection on %s\nExcecute as root\n",ifname);
    }
-   pthread_join(thread1);
+   pthread_join(thread1,NULL);
 }
 
 /* add ns to timespec */
@@ -788,21 +788,21 @@ int main(int argc, char *argv[]){
       /* start acyclic part */
       /*osal_thread_create(&thread3, stack64k * 4, &redtest, argv[1]);
       pthread_join(thread1,NULL);*/
-      redtest(argv[1]);
+      CSP_test(argv[1]);
       
    
-	FILE * fdati/*,*fcicli*/;
+	/*FILE * fdati,*fcicli;
 	
 	fdati=fopen("dati.txt","wt");
-	//fcicli=fopen("cicli.txt","at");
+	fcicli=fopen("cicli.txt","wt");
 	 
 	for(int i=0;i<cont;i++){
 	       fprintf(fdati,"%f %d %d\r\n",((double)(tv[i]-tv[0])/(double)(NSEC_PER_SEC)),misure[i],target_position_abs[i]); 
-	       //fprintf(fcicli,"%f %ld\r\n",((double)(tv[i]-tv[0])/(double)(NSEC_PER_SEC)),cicli[i]); 
+	       fprintf(fcicli,"%f %ld\r\n",((double)(tv[i]-tv[0])/(double)(NSEC_PER_SEC)),cicli[i]); 
 	   }
-	    printf("%d,%d",cont,target_position_abs[CAMPIONI]);   
+	   
 	 fclose(fdati);
-	 //fclose(fcicli);
+	 fclose(fcicli);
 	 /*fp = fopen("comando.txt", "wt"); 
 
   
@@ -823,7 +823,7 @@ int main(int argc, char *argv[]){
 }
   else
    {
-      printf("Usage: red_test ifname2 cycletime\nifname = eth0 for example\ncycletime in us\n");
+      printf("Usage: CSP_test ifname \nifname = eth0 for example\n");
    }
  printf("End program\n");
    return (0);
