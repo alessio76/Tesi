@@ -46,6 +46,8 @@
 #define COSTANTE_RIDUZIONE 51
 #define RISOLUZIONE 4000
 #define ANGOLO_GIRO 360
+
+#define stack8k (8 * 1024)
  
 const double deg_1=((double)ANGOLO_GIRO/((double)RISOLUZIONE*(double)COSTANTE_RIDUZIONE)); 
 //rappresenta un incremento in gradi 
@@ -251,7 +253,6 @@ void CSP_PDO_mapping(uint16 slave){
 	
 	}
 
-//mancano i parametri dei controllori e l'errore massimo di inseguimento
 int CSP_EPOSsetup(uint16 slave){
 	
     OBentry mode={0x6060, 0x00, sizeof(int8_t),(int8_t)8}; //modalità di funzionamento 8=CSP
@@ -367,6 +368,7 @@ int CSP_EPOSsetup(uint16 slave){
 	printf("max_gear_input_speed=%u,letti=%d, esito=%d\n",max_gear_input_speed_prova,length32,retval);*/
 	
 	//mappo i PDO
+	misure[0]=position_offset;
     CSP_PDO_mapping(EPOS4);
 	return 1;
 
@@ -448,110 +450,6 @@ int Servo_state_machine(int flag){
 	}
 }
 	
-	  
-OSAL_THREAD_FUNC CSP_test(char *ifname){
-   int cnt,i;
-
-   printf("Starting Redundant test\n");
-
-   /* initialise SOEM, bind socket to ifname */
-   if (ec_init(ifname))
-   {
-      printf("ec_init on %s succeeded.\n",ifname);
-      /* find and auto-config slaves */
-      if ( ec_config_init(FALSE) > 0 )
-      {
-         printf("%d slaves found and configured.\n",ec_slavecount);
-         /* wait for all slaves to reach PRE_OP state */
-		 ec_slave[0].state = EC_STATE_PRE_OP;
-		 ec_writestate (0);
-		 ec_statecheck(0, EC_STATE_PRE_OP, EC_TIMEOUTSTATE*4);
-		 
-		 ec_slave[EPOS4].PO2SOconfig = CSP_EPOSsetup; 
-
-         /* configure DC options for every DC capable slave found in the list */
-         ec_configdc();
-         ec_config_map(&IOmap);
-        
-        out_EPOS = (out_EPOSt*) ec_slave[1].outputs; //output del master
-        in_EPOS = (in_EPOSt*) ec_slave[1].inputs;  //input del master
-        
-        
-        /* read individual slave state and store in ec_slave[] */
-         ec_readstate();
-         for(cnt = 1; cnt <= ec_slavecount ; cnt++)
-         {
-            printf("Slave:%d Name:%s Output size:%3dbits Input size:%3dbits State:%2d delay:%d.%d\n",
-                  cnt, ec_slave[cnt].name, ec_slave[cnt].Obits, ec_slave[cnt].Ibits,
-                  ec_slave[cnt].state, (int)ec_slave[cnt].pdelay, ec_slave[cnt].hasdc);
-          }
-          
-         expectedWKC = (ec_group[0].outputsWKC * 2) + ec_group[0].inputsWKC;
-         printf("Calculated workcounter %d\n", expectedWKC);
-         
-         ec_slave[0].state = EC_STATE_SAFE_OP;
-		 ec_writestate (0);
-		 ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE*4);
-
-         printf("Request operational state for all slaves\n");
-         ec_slave[0].state = EC_STATE_OPERATIONAL;
-         /* request OP state for all slaves */
-         ec_writestate(0);
-         /* activate cyclic process data */
-         dorun = 1;
-         /* wait for all slaves to reach OP state */
-         ec_statecheck(0, EC_STATE_OPERATIONAL,  5 * EC_TIMEOUTSTATE);
-        
-         if (ec_slave[0].state == EC_STATE_OPERATIONAL )
-         {
-            printf("Operational state reached for all slaves.Actual state=%d\n",ec_slave[0].state);
-            inOP = TRUE;
-            /* acyclic loop */
-            for(i = 0; i <= CAMPIONI; i++)
-            {
-               printf("PDO n.%d,target_position=%d,cycle1=%ld,cycle2=%d \n",
-                  dorun, out_EPOS->target_position,cycle,ec_slave[1].DCcycle);
-                  
-               printf("statusword %4x,controlword %x, position_actual_value %d",
-               in_EPOS->statusword,out_EPOS->controlword,in_EPOS->position_actual_value);
-               
-               
-               fflush(stdout);
-               osal_usleep(1000);
-            }
-            dorun = 0;
-            inOP = FALSE;
-         }
-         else
-         {
-            printf("Not all slaves reached operational state.\n");
-             ec_readstate();
-             for(i = 1; i<=ec_slavecount ; i++)
-             {
-                 if(ec_slave[i].state != EC_STATE_OPERATIONAL)
-                 {
-                     printf("Slave %d State=0x%2.2x StatusCode=0x%4.4x : %s\n",
-                         i, ec_slave[i].state, ec_slave[i].ALstatuscode, ec_ALstatuscode2string(ec_slave[i].ALstatuscode));
-                 }
-             }
-         }
-         
-         
-      }
-      else
-      {
-         printf("No slaves found!\n");
-      }
-      printf("End redundant test, close socket\n");
-  
-   }
-   else
-   {
-      printf("No socket connection on %s\nExcecute as root\n",ifname);
-   }
-   pthread_join(thread1,NULL);
-}
-
 /* add ns to timespec */
 void add_timespec(struct timespec *ts, int64 addtime){
    int64 sec, nsec;
@@ -567,6 +465,7 @@ void add_timespec(struct timespec *ts, int64 addtime){
       ts->tv_nsec = nsec;
    }
 }
+
 
 /* PI calculation to get linux time synced to DC time */
 void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime){
@@ -588,35 +487,59 @@ OSAL_THREAD_FUNC ecatthread(){
    int ht;
    int64 cycletime;
    struct sched_attr attr;
-   sched_deadline(&attr,RUNTIME,DEADLINE,DEADLINE,0);
-   int i=0;
-   int check;
+   //sched_deadline(&attr,RUNTIME,DEADLINE,DEADLINE,0);
+   sched_fifo(&attr,30,0);
+   int i=500;
+   //int check;
 
    clock_gettime(CLOCK_MONOTONIC, &ts);
    ht = (ts.tv_nsec / 1000000) + 1; /* round to nearest ms */
    ts.tv_nsec = ht * 1000000;
    cycletime = DEADLINE; /* cycletime in ns */
    toff = 0;
-   dorun = 0;
-   
-   /* eseguo il pinning della pagine attuali e future occupate dal thread per garantire
+   //dorun = 0;
+    /* eseguo il pinning della pagine attuali e future occupate dal thread per garantire
         prevedibilità nelle prestazioni real-time */
    if(mlockall(MCL_CURRENT|MCL_FUTURE) == -1){
          printf("mlockall failed: %m\n");
          pthread_cancel(pthread_self());
         }
         
-   ec_send_processdata();
-   while(i<=CAMPIONI)
-   {
+         
+    ec_send_processdata();
+   //porta il controller nello stato OPERATION_ENABLED	
+    while(!Servo_state_machine(MOVE)){
+	   add_timespec(&ts, cycletime + toff);
+       clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
+	   wkc=ec_receive_processdata(EC_TIMEOUTRET);
+	   ec_sync(ec_DCtime, cycletime, &toff);
+       ec_send_processdata();
+	   }
+	    
+	//aspetto che il controller setti i parametri nuovi    
+	while(i){
+	   add_timespec(&ts, cycletime + toff);
+       clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
+	   wkc=ec_receive_processdata(EC_TIMEOUTRET);
+	   ec_sync(ec_DCtime, cycletime, &toff);
+       ec_send_processdata();
+	   i--;
+	   }
+	
+    tv[0]=ec_DCtime;
+    i=0;    
+    ec_send_processdata();
+    
+    while(i<=CAMPIONI)
+    {
 	  prova1=ec_DCtime;
 	  time1=ec_DCtime;
       /* calculate next cycle start */
       add_timespec(&ts, cycletime + toff);
       /* wait to cycle start */
       clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
-      if (dorun>0)
-      {
+      /*if (dorun>0)
+      {*/
          wkc = ec_receive_processdata(EC_TIMEOUTRET);
          dorun++;
          
@@ -626,24 +549,21 @@ OSAL_THREAD_FUNC ecatthread(){
             ec_sync(ec_DCtime, cycletime, &toff);
          }
          
-	     check=Servo_state_machine(MOVE);
-	   
-	     if(check){
-			 misure[i]=in_EPOS->position_actual_value;
-			 tv[i]=ec_DCtime;
-			 out_EPOS->target_position=target_position_abs[i];
-			 i++;
-		 }
-		 
-         ec_send_processdata();
+	     Servo_state_machine(MOVE);
+	     misure[i]=in_EPOS->position_actual_value;
+		 tv[i]=ec_DCtime;
+	     out_EPOS->target_position=target_position_abs[i];
+		 ec_send_processdata();
+		 i++;
          time2=ec_DCtime;
          cycle=time2-time1;
          cicli[i]=cycle;
          time1=time2;
          
-      }
+      //}
    }
    
+   //eseguo il ciclo per fermarmi nella posizione finale 
    while((in_EPOS->position_actual_value<=(target_position_abs[CAMPIONI]-TRESHOLD)) || 
    (in_EPOS->position_actual_value>=(target_position_abs[CAMPIONI]+TRESHOLD))){
 	   
@@ -651,16 +571,12 @@ OSAL_THREAD_FUNC ecatthread(){
 		 clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
 	     wkc=ec_receive_processdata(EC_TIMEOUTRET);
 	     ec_sync(ec_DCtime, cycletime, &toff);
-         check=Servo_state_machine(MOVE);
-	   
-	     if(check){
-			 misure[i]=in_EPOS->position_actual_value;
-			 tv[i]=ec_DCtime;
-			 out_EPOS->target_position=target_position_abs[CAMPIONI];
-			 i++;
-		 }
-		 
+         Servo_state_machine(MOVE);
+	     misure[i]=in_EPOS->position_actual_value;
+		 tv[i]=ec_DCtime;
+		 out_EPOS->target_position=target_position_abs[CAMPIONI];
          ec_send_processdata();
+         i++;
 	 }
    
    
@@ -683,6 +599,111 @@ OSAL_THREAD_FUNC ecatthread(){
    cont=i;
    		
 }
+
+	  
+OSAL_THREAD_FUNC CSP_test(char *ifname){
+   int cnt,i;
+
+   printf("Starting Redundant test\n");
+
+   /* initialise SOEM, bind socket to ifname */
+   if (ec_init(ifname))
+   {
+      printf("ec_init on %s succeeded.\n",ifname);
+      /* find and auto-config slaves */
+      if ( ec_config_init(FALSE) > 0 )
+      {
+         printf("%d slaves found and configured.\n",ec_slavecount);
+         /* wait for all slaves to reach PRE_OP state */
+		 ec_slave[0].state = EC_STATE_PRE_OP;
+		 ec_writestate (0);
+		 ec_statecheck(0, EC_STATE_PRE_OP, EC_TIMEOUTSTATE*4);
+		  
+		 ec_slave[EPOS4].PO2SOconfig = CSP_EPOSsetup; 
+
+         /* configure DC options for every DC capable slave found in the list */
+         ec_configdc();
+         ec_config_map(&IOmap);
+        
+        out_EPOS = (out_EPOSt*) ec_slave[1].outputs; //output del master
+        in_EPOS = (in_EPOSt*) ec_slave[1].inputs;  //input del master
+      
+        /* read individual slave state and store in ec_slave[] */
+         ec_readstate();
+         for(cnt = 1; cnt <= ec_slavecount ; cnt++)
+         {
+            printf("Slave:%d Name:%s Output size:%3dbits Input size:%3dbits State:%2d delay:%d.%d\n",
+                  cnt, ec_slave[cnt].name, ec_slave[cnt].Obits, ec_slave[cnt].Ibits,
+                  ec_slave[cnt].state, (int)ec_slave[cnt].pdelay, ec_slave[cnt].hasdc);
+          }
+          
+         expectedWKC = (ec_group[0].outputsWKC * 2) + ec_group[0].inputsWKC;
+         printf("Calculated workcounter %d\n", expectedWKC);
+         
+         ec_slave[0].state = EC_STATE_SAFE_OP;
+		 ec_writestate (0);
+		 ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE*4);
+
+         printf("Request operational state for all slaves\n");
+         ec_slave[0].state = EC_STATE_OPERATIONAL;
+         /* request OP state for all slaves */
+         ec_writestate(0);
+         // activate cyclic process data 
+         //dorun = 1;
+         osal_thread_create(&thread1, stack8k * 2, &ecatthread, NULL);
+         /* wait for all slaves to reach OP state */
+         ec_statecheck(0, EC_STATE_OPERATIONAL,  5 * EC_TIMEOUTSTATE);
+        
+         if (ec_slave[0].state == EC_STATE_OPERATIONAL)
+         {
+            printf("Operational state reached for all slaves.Actual state=%d\n",ec_slave[0].state);
+            inOP = TRUE;
+            /* acyclic loop */
+            for(i = 0; i <= CAMPIONI; i++)
+            {
+               printf("PDO n.%d,target_position=%d,cycle1=%ld,cycle2=%d \n",
+                  dorun, out_EPOS->target_position,cycle,ec_slave[1].DCcycle);
+                  
+               printf("statusword %4x,controlword %x, position_actual_value %d",
+               in_EPOS->statusword,out_EPOS->controlword,in_EPOS->position_actual_value);
+               
+               
+               fflush(stdout);
+               osal_usleep(1000);
+            }
+            //dorun = 0;
+            inOP = FALSE;
+         }
+         else
+         {
+            printf("Not all slaves reached operational state.\n");
+             ec_readstate();
+             for(i = 1; i<=ec_slavecount ; i++)
+             {
+                 if(ec_slave[i].state != EC_STATE_OPERATIONAL)
+                 {
+                     printf("Slave %d State=0x%2.2x StatusCode=0x%4.4x : %s\n",
+                         i, ec_slave[i].state, ec_slave[i].ALstatuscode, ec_ALstatuscode2string(ec_slave[i].ALstatuscode));
+                 }
+             }
+         }
+         
+         
+      }
+      else
+      {
+         printf("No slaves found!\n");
+      }
+      printf("End CSP test, close socket\n");
+  
+   }
+   else
+   {
+      printf("No socket connection on %s\nExcecute as root\n",ifname);
+   }
+   pthread_join(thread1,NULL);
+}
+
 
 OSAL_THREAD_FUNC ecatcheck(){
     int slave;
@@ -759,18 +780,17 @@ OSAL_THREAD_FUNC ecatcheck(){
     }
 }
 
-#define stack64k (64 * 1024)
 
 int main(int argc, char *argv[]){
   
-   printf("SOEM (Simple Open EtherCAT Master)\nRedundancy test\n");
+   printf("SOEM (Simple Open EtherCAT Master)\nCSP test\n");
    
    if (argc > 0)
    {
      dorun = 0;
      
      double t=0;
-     double f=1;  //frequenza in Hz
+     double f=3;  //frequenza in Hz
      
 	   for(int i=0;i<=CAMPIONI;i++){
 		    target_position_abs[i]=deg_to_inc((double)AMPIEZZA*sin(2*PI*f*t));
@@ -780,18 +800,18 @@ int main(int argc, char *argv[]){
 		
 		
 	/* create RT thread */
-      osal_thread_create(&thread1, stack64k * 2, &ecatthread, NULL);
+     // osal_thread_create(&thread1, stack8k * 2, &ecatthread, NULL);
 
       /* create thread to handle slave error handling in OP */
-      osal_thread_create(&thread2, stack64k * 4, &ecatcheck, NULL);
+      osal_thread_create(&thread2, stack8k * 4, &ecatcheck, NULL);
 
       /* start acyclic part */
       /*osal_thread_create(&thread3, stack64k * 4, &redtest, argv[1]);
       pthread_join(thread1,NULL);*/
       CSP_test(argv[1]);
-      
+    
    
-	/*FILE * fdati,*fcicli;
+	FILE * fdati,*fcicli,*fp;
 	
 	fdati=fopen("dati.txt","wt");
 	fcicli=fopen("cicli.txt","wt");
@@ -813,18 +833,18 @@ int main(int argc, char *argv[]){
   
    //chiudo il file su cui ho scritto il comando da eseguire 
    
-  fclose(fp); 
+  fclose(fp); */
 
   
-   eseguo il programma GNUplot passandogli il nome del file che 
+   /*eseguo il programma GNUplot passandogli il nome del file che 
    contiene il comando da eseguire*/
    
-  //system("gnuplot -persist comando.txt");    
+  system("gnuplot -persist comando.txt");    
 }
   else
    {
       printf("Usage: CSP_test ifname \nifname = eth0 for example\n");
    }
- printf("End program\n");
+   printf("End program\n");
    return (0);
 }
