@@ -1,3 +1,5 @@
 master EtherCAT
 (meglio usare anche tig)
 versione kernel: 4.19.100-rt41
+passo=.001 troppo piccolo
+aggiungere un attesa prima di somministrare il riferimento
