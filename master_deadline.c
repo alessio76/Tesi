@@ -1,16 +1,12 @@
 #include <sys/mman.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/time.h>
 #include <unistd.h>
 #include <sched.h>
-#include <string.h>
 #include <sys/time.h>
 #include <time.h>
 #include <pthread.h>
 #include <math.h>
-#include <semaphore.h>
-#include <sys/resource.h>
 
 #include "ethercat.h"
 
@@ -19,9 +15,9 @@
 #define DEADLINE 1000000 //deadline in ns
 #define RUNTIME 900000 //runtime assicurato in ns
 #define EPOS4 1 
-#define DELAY 5000
+#define DELAY DEADLINE/2
 #define PI 3.141592654
-#define CAMPIONI 1000
+#define CAMPIONI 1000 //8000
 #define PASSO 0.00005
 #define AMPIEZZA 0
 #define TRESHOLD 50
@@ -54,7 +50,7 @@
 const double deg_1=((double)ANGOLO_GIRO/((double)RISOLUZIONE*(double)COSTANTE_RIDUZIONE)); 
 
 char IOmap[4096];
-pthread_t thread1, thread2,thread3;
+pthread_t thread1,thread2,thread3;
 int dorun = 0;
 //int deltat, tmax = 0;
 int64 toff, gl_delta;
@@ -75,8 +71,9 @@ int misure_rpm[CAMPIONI+100];
 int misure_coppia[CAMPIONI+100];
 int64 tv[CAMPIONI+100];
 long int cicli[CAMPIONI+100];
-int i=1000;
+int i=2000;
 int check;
+int shutdown=1;
 
 /* INIT=sincronizzazione e apertura della mailbox
  * PRE_OP=scambio di SDO via mailbox per settare i PDO e altri valori di default
@@ -466,6 +463,7 @@ int Servo_state_machine(int flag){
 	
 //funzione che aggiorna la deadline per sincronizzare ecatthread
 void refresh_deadline(struct sched_attr *attr, uint64 addtime){
+     attr->sched_runtime=RUNTIME;
      attr->sched_deadline=addtime;
 	 attr->sched_period=addtime;
 		
@@ -475,6 +473,20 @@ void refresh_deadline(struct sched_attr *attr, uint64 addtime){
 			 }
 }
 
+void add_timespec(struct timespec *ts, int64 addtime){
+   int64 sec, nsec;
+
+   nsec = addtime % NSEC_PER_SEC;
+   sec = (addtime - nsec) / NSEC_PER_SEC;
+   ts->tv_sec += sec;
+   ts->tv_nsec += nsec;
+   if ( ts->tv_nsec > NSEC_PER_SEC )
+   {
+      nsec = ts->tv_nsec % NSEC_PER_SEC;
+      ts->tv_sec += (ts->tv_nsec - nsec) / NSEC_PER_SEC;
+      ts->tv_nsec = nsec;
+   }
+}
 //sincronizzazione del clock del master e della rete
 void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime){
    static int64 integral = 0;
@@ -490,9 +502,17 @@ void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime){
 
 /* RT EtherCAT thread */
 OSAL_THREAD_FUNC ecatthread(){	
+	struct timespec ts, tleft;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+  int ht = (ts.tv_nsec / 1000000) + 1; /* round to nearest ms */
+   ts.tv_nsec = ht * 1000000;
+   int cycletime=DEADLINE;
     struct sched_attr attr;
     attr.size=sizeof(attr);
+    attr.sched_nice=attr.sched_priority=0;
+    attr.sched_flags= SCHED_FLAG_DL_OVERRUN;
     sched_deadline(&attr,RUNTIME,DEADLINE,DEADLINE,0);
+    
   
    toff = 0;
     /* eseguo il pinning della pagine attuali e future occupate dal thread per garantire
@@ -507,22 +527,24 @@ OSAL_THREAD_FUNC ecatthread(){
     //aspetto che il controller setti i parametri nuovi    
     //dura 1s
 	while(i){
-		
 	   time1=ec_DCtime;
 	   refresh_deadline(&attr,(uint64)(DEADLINE+toff));	 
 	   sched_yield();
 	   wkc=ec_receive_processdata(EC_TIMEOUTRET);
 	   ec_sync(ec_DCtime, DEADLINE, &toff);	
+	   i--;
 	   ec_send_processdata();
        time2=ec_DCtime;
        cycle=time2-time1;
-	   i--;
-	   }
-	    i=0;
+	   
+	   
+	}
+	i=0; 
    //porta il controller nello stato OPERATION_ENABLED	
    //dura circa 20ms
     while(check!=1){
-	   refresh_deadline(&attr,(uint64)(DEADLINE+toff));		 
+	   time1=ec_DCtime;
+	   refresh_deadline(&attr,(uint64)(DEADLINE+toff));		
 	   sched_yield();
 	   wkc=ec_receive_processdata(EC_TIMEOUTRET);
 	   check=Servo_state_machine(MOVE);
@@ -530,20 +552,19 @@ OSAL_THREAD_FUNC ecatthread(){
 	   ec_send_processdata();
        time2=ec_DCtime;
        cycle=time2-time1;
-       }
-	
+       
+	}
 	//fornisce tutti i riferimenti della traiettoria
     //dura CAMPIONI*1ms
-    while(i<=CAMPIONI)
+    while(i<CAMPIONI)
     {
 	  time1=ec_DCtime;
       //imposto l'inizio del prossimo ciclo 
-      refresh_deadline(&attr,(uint64)(DEADLINE+toff));	 	
+      refresh_deadline(&attr,(uint64)(DEADLINE+toff));	 
       //quando associato a SCHED_DEADLINE sched_yield blocca il thread e lo risveglia
       //al prossimo ciclo	 
 	  sched_yield();
-      /*if (dorun>0)
-      {*/
+	 
          wkc = ec_receive_processdata(EC_TIMEOUTRET);
          dorun++;
         //calcola toff per sincronizzare il master e l'orologio DC 
@@ -555,49 +576,56 @@ OSAL_THREAD_FUNC ecatthread(){
 	     misure_coppia[i]=in_EPOS->torque_actual_value;
 		 tv[i]=ec_DCtime;
 		 out_EPOS->target_position=target_position_abs[i];
-		 if(check){
-		   i++;}
+		 if(check)
+			  i++;
 		 ec_send_processdata();
 		 time2=ec_DCtime;
          cycle=time2-time1;
          cicli[i]=cycle;
-         time1=time2;
-     // }
+         //time1=time2;
+      
    }
-   
+   //i=CAMPIONI	
    //eseguo il ciclo per fermarmi nella posizione finale 
    //dura al massimo 15-20 ms 
-   while((in_EPOS->position_actual_value<=(target_position_abs[CAMPIONI]-TRESHOLD+position_offset)) || 
-   (in_EPOS->position_actual_value>=(target_position_abs[CAMPIONI]+TRESHOLD+position_offset))){
+   while((in_EPOS->position_actual_value<=(target_position_abs[CAMPIONI-1]-TRESHOLD+position_offset)) || 
+   (in_EPOS->position_actual_value>=(target_position_abs[CAMPIONI-1]+TRESHOLD+position_offset))){
 	   
-	    refresh_deadline(&attr,(uint64)(DEADLINE+toff));		 
+
+	    refresh_deadline(&attr,(uint64)(DEADLINE+toff));	 
 	    sched_yield();
+	    
 	    wkc=ec_receive_processdata(EC_TIMEOUTRET);
-	    ec_sync(ec_DCtime, DEADLINE, &toff);
+	    //ec_sync(ec_DCtime, DEADLINE, &toff);
         Servo_state_machine(MOVE);
 	    misure_posizione[i]=in_EPOS->position_actual_value;
 	    misure_corrente[i]=in_EPOS->current_actual_value;
 	    misure_rpm[i]=in_EPOS->velocity_actual_value;
 	    misure_coppia[i]=in_EPOS->torque_actual_value;
+	    target_position_abs[i]=target_position_abs[CAMPIONI-1];
 		tv[i]=ec_DCtime;
-		out_EPOS->target_position=target_position_abs[CAMPIONI];
+		out_EPOS->target_position=target_position_abs[CAMPIONI-1];
+		 i++;
         ec_send_processdata();
-        i++;
-	 }
+       
+	 
 	 //ritardo la cessazione dell'azione di controllo per dare tempo all'asse 
 	 //di tornare nella posizione finale corretta
 	  //dura .5s
-   int j=500;
-   while(j){
+   }
+    int j=500;
+
+    while(j){
 	   refresh_deadline(&attr,(uint64)(DEADLINE+toff));		 
 	   sched_yield();
 	   wkc=ec_receive_processdata(EC_TIMEOUTRET);
 	   ec_sync(ec_DCtime, DEADLINE, &toff);
+	      j--;
        ec_send_processdata();
-	   j--;
-	   }
+	
 	   
-      refresh_deadline(&attr,(uint64)(DEADLINE+toff));		   
+	  } 
+      refresh_deadline(&attr,(uint64)(DEADLINE+toff));	
 	  sched_yield();
 	  Servo_state_machine(STOP); //porto il controller nello stato iniziale
       ec_sync(ec_DCtime, DEADLINE, &toff);
@@ -611,14 +639,16 @@ OSAL_THREAD_FUNC ecatthread(){
    
       ec_dcsync0(EPOS4,FALSE,0,0); //disattivo SYNC0
       ec_close();  //chiudo la connessione
-  
+	  shutdown=0; 
    		
 }
 
 	  
 OSAL_THREAD_FUNC CSP_test(char *ifname){
    int cnt;
-   
+   struct sched_attr attr;
+   attr.size=sizeof(attr);
+   sched_normal(&attr,0,0);
    printf("Starting Redundant test\n");
 
    //inizializza SOEM e lo collega alla porta ifname
@@ -669,7 +699,7 @@ OSAL_THREAD_FUNC CSP_test(char *ifname){
          //crea il thread real-time per lo scambio dati
          osal_thread_create(&thread1, stack8k * 2, &ecatthread, NULL); 
          //dorun=1;
-          //aspetta che tutti raggiungano OPERATIONAL
+         //aspetta che tutti raggiungano OPERATIONAL
          ec_statecheck(0, EC_STATE_OPERATIONAL, EC_TIMEOUTSTATE*5);
           
          if (ec_slave[0].state == EC_STATE_OPERATIONAL)
@@ -678,11 +708,14 @@ OSAL_THREAD_FUNC CSP_test(char *ifname){
             printf("Operational state reached for all slaves.Actual state=%d\n",ec_slave[0].state);
             inOP = TRUE;
            //ciclo per stampare i dati in tempo reale
-            for(int j = 0; j <= CAMPIONI; j++)
+            //for(int j = 0; j <= CAMPIONI; j++)
+             //prima di terminare aspetta che ecatthread abbia finito tutto
+               //sched_deadline(&attr,1200000,DEADLINE+500000,DEADLINE+500000,0);
+            while(shutdown)
             {
 			   
-               printf("PDO n.%d,i=%d,target_position=%d,cycle1=%ld,cycle2=%d\n",
-                  dorun, check,out_EPOS->target_position+out_EPOS->position_offset,cycle,ec_slave[1].DCcycle);
+              printf("PDO n.%d,target_position=%d,cycle1=%ld,cycle2=%d\n",
+                  i, out_EPOS->target_position+out_EPOS->position_offset,cycle,ec_slave[1].DCcycle);
                   
                printf("statusword %4x,controlword %x, position_actual_value %d",
                in_EPOS->statusword,out_EPOS->controlword,in_EPOS->position_actual_value);
@@ -690,6 +723,7 @@ OSAL_THREAD_FUNC CSP_test(char *ifname){
                
                fflush(stdout);
                osal_usleep(1000);
+               //sched_yield();
             }
             //dorun = 0;
             inOP = FALSE;
@@ -719,13 +753,14 @@ OSAL_THREAD_FUNC CSP_test(char *ifname){
    {
       printf("No socket connection on %s\nExcecute as root\n",ifname);
    }
-    //prima di terminare aspetta che ecatthread abbia finito tutto
-   pthread_join(thread1,NULL);
 }
 
 
 OSAL_THREAD_FUNC ecatcheck(){
     int slave;
+   struct sched_attr attr;
+   attr.size=sizeof(attr);
+   //sched_deadline(&attr,RUNTIME*2,DEADLINE*2,DEADLINE*2,0);
 
     while(1)
     {
@@ -796,39 +831,40 @@ OSAL_THREAD_FUNC ecatcheck(){
                printf("OK : all slaves resumed OPERATIONAL.\n");
         }
         osal_usleep(10000);
+        //sched_yield();
     }
 }
 
 
 int main(int argc, char *argv[]){
   
-   printf("SOEM (Simple Open EtherCAT Master)\nCSP test\n");
+  int pid=getpid();
+   printf("SOEM (Simple Open EtherCAT Master)\nCSP test\nPID=%d",pid);
+   
    
    if (argc > 0)
    {
      dorun = 0;
      
      double t=0;   //tempo in secondi
-	 double f=1;  //frequenza in Hz
+	 double f=3;  //frequenza in Hz
      
-	   for(int i=0;i<=CAMPIONI;i++){
-		    //target_position_abs[i]=deg_to_inc((double)AMPIEZZA*sin(2*PI*f*t));
-		    target_position_abs[i]=deg_to_inc(AMPIEZZA);
+	   for(int i=0;i<CAMPIONI;i++){
+		    target_position_abs[i]=deg_to_inc((double)AMPIEZZA*sin(2*PI*f*t));
+		    //target_position_abs[i]=deg_to_inc(AMPIEZZA);
 			t+=PASSO; 
 		}
 		
 	/* create RT thread */
       //osal_thread_create(&thread1, stack8k * 2, &ecatthread, NULL);
-
       /* create thread to handle slave error handling in OP */
       osal_thread_create(&thread2, stack8k * 4, &ecatcheck, NULL);
 
       /* start acyclic part */
-      /*osal_thread_create(&thread3, stack64k * 4, &CSP_test, argv[1]);
-      pthread_join(thread1,NULL);*/
+      /*osal_thread_create(&thread3, stack8k * 4, &CSP_test, argv[1]);
+      pthread_join(thread3,NULL);*/
       CSP_test(argv[1]);
-   
-   
+			 
 	FILE * fposizione,*fcicli,*fcorrente,*fp;
 	
 	fposizione=fopen("posizione.txt","wt");
@@ -838,11 +874,11 @@ int main(int argc, char *argv[]){
 	for(int j=0;j<i;j++){
 		//matlab legge \n correttamente come a capo, in Windows serve \r\n
 	       fprintf(fposizione,"%f %f %f\r\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),
-	      inc_to_deg(misure_posizione[j]),inc_to_deg(target_position_abs[j]+position_offset));
+	       inc_to_deg(misure_posizione[j]),inc_to_deg(target_position_abs[j]+position_offset));
 	        
 	       fprintf(fcicli,"%f %ld\r\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),cicli[j]); 
 	       
-	       fprintf(fcorrente,"%f %d %d %d\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),misure_corrente[j],
+	       fprintf(fcorrente,"%f %d %d %d\r\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),misure_corrente[j],
 	       misure_rpm[j],misure_coppia[j]);
 	   }
 	   

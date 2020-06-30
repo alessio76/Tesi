@@ -4,8 +4,6 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <sched.h>
-#include <string.h>
-#include <sys/time.h>
 #include <time.h>
 #include <pthread.h>
 #include <math.h>
@@ -16,11 +14,11 @@
 #define MSEC_PER_SEC 1000
 #define EC_TIMEOUTMON 500
 #define DEADLINE 1000000 //deadline in ns
-#define RUNTIME 500000 //runtime assicurato in ns
+#define RUNTIME 800000 //runtime assicurato in ns
 #define EPOS4 1 
-#define DELAY 5000
+#define DELAY DEADLINE/2
 #define PI 3.141592654
-#define CAMPIONI 20000
+#define CAMPIONI 8000
 #define PASSO 0.00005
 #define AMPIEZZA 60
 #define TRESHOLD 50
@@ -49,13 +47,14 @@
 #define ANGOLO_GIRO 360
 
 #define stack8k (8 * 1024)
- 
-const double deg_1=((double)ANGOLO_GIRO/((double)RISOLUZIONE*(double)COSTANTE_RIDUZIONE)); 
+
 //rappresenta un incremento in gradi 
+const double deg_1=((double)ANGOLO_GIRO/((double)RISOLUZIONE*(double)COSTANTE_RIDUZIONE)); 
+
 char IOmap[4096];
-pthread_t thread1, thread2,thread3;
+pthread_t thread1,thread2,thread3;
 int dorun = 0;
-int deltat, tmax = 0;
+//int deltat, tmax = 0;
 int64 toff, gl_delta;
 int expectedWKC;
 long int time1;
@@ -66,19 +65,17 @@ volatile int wkc;
 boolean inOP;
 uint8 currentgroup = 0;
 //posizione desiderata in incrementi
-int32 target_position_abs[2*CAMPIONI]; 
+int32 target_position_abs[CAMPIONI+100]; 
 int32 position_offset;
-int misure_posizione[2*CAMPIONI];
-int misure_corrente[2*CAMPIONI];
-int misure_rpm[2*CAMPIONI];
-int misure_coppia[2*CAMPIONI];
-long long int prova1;
-long long int prova2;
-int64 tv[2*CAMPIONI];
-long int cicli[2*CAMPIONI];
-int cont=0;
-int test=500;
+int misure_posizione[CAMPIONI+100];
+int misure_corrente[CAMPIONI+100];
+int misure_rpm[CAMPIONI+100];
+int misure_coppia[CAMPIONI+100];
+int64 tv[CAMPIONI+100];
+long int cicli[CAMPIONI+100];
+int i=2000;
 int check;
+int shutdown=1;
 
 /* INIT=sincronizzazione e apertura della mailbox
  * PRE_OP=scambio di SDO via mailbox per settare i PDO e altri valori di default
@@ -109,7 +106,7 @@ typedef struct PACKED
 
 out_EPOSt  * out_EPOS;
 
-//struttra che rappresenta le uscite dell'EPOS
+//struttura che rappresenta le uscite dell'EPOS
 typedef struct PACKED
 {
         int32 position_actual_value;
@@ -122,6 +119,7 @@ typedef struct PACKED
 
 in_EPOSt * in_EPOS;
 
+//conversione da gradi a incrementi
 int deg_to_inc(double deg){
 	
 	int32 temp=(int32)(deg/deg_1);
@@ -129,6 +127,7 @@ int deg_to_inc(double deg){
 	
 	}
 
+//conversione da incrementi a gradi
 double inc_to_deg(int inc){
 	
 	double temp=((double)inc*deg_1);
@@ -136,6 +135,7 @@ double inc_to_deg(int inc){
 	
 	}
 
+//funzione che mappa i PDO e abilita SYNC0
 void CSP_PDO_mapping(uint16 slave){
 	
 	int RxPDOs_number=0; 
@@ -266,6 +266,7 @@ void CSP_PDO_mapping(uint16 slave){
 	
 	}
 
+//funzione che esegue il setup dei parametri e chiama quella per la mappatura
 int CSP_EPOSsetup(uint16 slave){
 	
     OBentry mode={0x6060, 0x00, sizeof(int8_t),(int8_t)8}; //modalità di funzionamento 8=CSP
@@ -462,7 +463,7 @@ int Servo_state_machine(int flag){
 	}
 }
 	
-/* add ns to timespec */
+//funzione che aggiorna quando ecathread dovrà svegliarsi
 void add_timespec(struct timespec *ts, int64 addtime){
    int64 sec, nsec;
 
@@ -478,11 +479,11 @@ void add_timespec(struct timespec *ts, int64 addtime){
    }
 }
 
-/* PI calculation to get linux time synced to DC time */
+//sincronizzazione del clock del master e della rete
 void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime){
    static int64 integral = 0;
    int64 delta;
-   /* set linux sync point 50us later than DC sync, just as example */
+  
    delta = (reftime) % cycletime;
    if(delta> (cycletime / 2)) { delta= delta - cycletime; }
    if(delta>0){ integral++; }
@@ -497,7 +498,7 @@ OSAL_THREAD_FUNC ecatthread(){
    int ht;
    int64 cycletime;
    struct sched_attr attr;
-   //sched_deadline(&attr,RUNTIME,DEADLINE,DEADLINE,0);
+   attr.size=sizeof(attr);
    sched_fifo(&attr,40,0);
 
    clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -513,33 +514,36 @@ OSAL_THREAD_FUNC ecatthread(){
          pthread_cancel(pthread_self());
         }
         
-         
     ec_send_processdata();
-   //porta il controller nello stato OPERATION_ENABLED	
-    while(Servo_state_machine(MOVE)!=1){
+  
+    //aspetto che il controller setti i parametri nuovi  
+    //dura 1s  
+	while(i){
 	   add_timespec(&ts, cycletime + toff);
        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
 	   wkc=ec_receive_processdata(EC_TIMEOUTRET);
 	   ec_sync(ec_DCtime, cycletime, &toff);
        ec_send_processdata();
+	   i--;
 	   }
-	    
-	//aspetto che il controller setti i parametri nuovi    
-	while(test){
+	   
+   //porta il controller nello stato OPERATION_ENABLED	
+   //dura circa 20 ms
+    while(check!=1){
 	   add_timespec(&ts, cycletime + toff);
        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
 	   wkc=ec_receive_processdata(EC_TIMEOUTRET);
+	   check=Servo_state_machine(MOVE);
 	   ec_sync(ec_DCtime, cycletime, &toff);
        ec_send_processdata();
-	   test--;
 	   }
 	
-    test=0;    
-    ec_send_processdata();
-    
-    while(test<CAMPIONI)
+    i=0;    
+   
+    //fornisce tutti i riferimenti della traiettoria
+    //dura CAMPIONI*1ms
+    while(i<CAMPIONI)
     {
-	  prova1=ec_DCtime;
 	  time1=ec_DCtime;
       // calculate next cycle start 
       add_timespec(&ts, cycletime + toff);
@@ -549,51 +553,49 @@ OSAL_THREAD_FUNC ecatthread(){
       //{
          wkc = ec_receive_processdata(EC_TIMEOUTRET);
          dorun++;
-         
-         if (ec_slave[0].hasdc)
-         {
-            //calulate toff to get linux time and DC synced 
-            ec_sync(ec_DCtime, cycletime, &toff);
-         }
-         
+         //calcola toff per sincronizzare il master e l'orologio DC 
+         ec_sync(ec_DCtime, cycletime, &toff);
 	     check=Servo_state_machine(MOVE);
-	     misure_posizione[test]=in_EPOS->position_actual_value;
-	     misure_corrente[test]=in_EPOS->current_actual_value;
-	     misure_rpm[test]=in_EPOS->velocity_actual_value;
-	     misure_coppia[test]=in_EPOS->torque_actual_value;
-		 tv[test]=ec_DCtime;
-		 out_EPOS->target_position=target_position_abs[test];
-		 if(check){
-		   test++;}
-	     //else  out_EPOS->target_position=target_position_abs[1];
+	     misure_posizione[i]=in_EPOS->position_actual_value;
+	     misure_corrente[i]=in_EPOS->current_actual_value;
+	     misure_rpm[i]=in_EPOS->velocity_actual_value;
+	     misure_coppia[i]=in_EPOS->torque_actual_value;
+		 tv[i]=ec_DCtime;
+		 out_EPOS->target_position=target_position_abs[i];
+		 if(check)
+		      i++;
 		 ec_send_processdata();
 		 time2=ec_DCtime;
          cycle=time2-time1;
-         cicli[test]=cycle;
-         time1=time2;
+         cicli[i]=cycle;
+       
       //}
    }
    
+   //i=CAMPIONI
    //eseguo il ciclo per fermarmi nella posizione finale 
-   while((in_EPOS->position_actual_value<=(target_position_abs[CAMPIONI]-TRESHOLD+position_offset)) || 
-   (in_EPOS->position_actual_value>=(target_position_abs[CAMPIONI]+TRESHOLD+position_offset))){
+   //dura al massimo 15-20 ms 
+   while((in_EPOS->position_actual_value<=(target_position_abs[CAMPIONI-1]-TRESHOLD+position_offset)) || 
+   (in_EPOS->position_actual_value>=(target_position_abs[CAMPIONI-1]+TRESHOLD+position_offset))){
 	   
 	     add_timespec(&ts, cycletime + toff);
 		 clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
 	     wkc=ec_receive_processdata(EC_TIMEOUTRET);
 	     ec_sync(ec_DCtime, cycletime, &toff);
          Servo_state_machine(MOVE);
-	     misure_posizione[test]=in_EPOS->position_actual_value;
-	     misure_corrente[test]=in_EPOS->current_actual_value;
-	     misure_rpm[test]=in_EPOS->velocity_actual_value;
-	     misure_coppia[test]=in_EPOS->torque_actual_value;
-		 tv[test]=ec_DCtime;
-		 out_EPOS->target_position=target_position_abs[CAMPIONI];
+	     misure_posizione[i]=in_EPOS->position_actual_value;
+	     misure_corrente[i]=in_EPOS->current_actual_value;
+	     misure_rpm[i]=in_EPOS->velocity_actual_value;
+	     misure_coppia[i]=in_EPOS->torque_actual_value;
+	     target_position_abs[i]=target_position_abs[CAMPIONI-1];
+		 tv[i]=ec_DCtime;
+		 out_EPOS->target_position=target_position_abs[CAMPIONI-1];
          ec_send_processdata();
-         test++;
+         i++;
 	 }
 	 //ritardo la cessazione dell'azione di controllo per dare tempo all'asse 
 	 //di tornare nella posizione finale corretta
+	 //dura .5s
    int j=500;
    while(j){
 	   add_timespec(&ts, cycletime + toff);
@@ -603,7 +605,7 @@ OSAL_THREAD_FUNC ecatthread(){
        ec_send_processdata();
 	   j--;
 	   }
-	   
+	  
    add_timespec(&ts, cycletime + toff);
    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
    ec_sync(ec_DCtime, cycletime, &toff); 
@@ -614,54 +616,50 @@ OSAL_THREAD_FUNC ecatthread(){
    add_timespec(&ts, cycletime + toff);
    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
    ec_sync(ec_DCtime, cycletime, &toff);
-   ec_slave[0].state = EC_STATE_SAFE_OP;
+   
+   ec_slave[0].state = EC_STATE_INIT; //imposto lo stato inziale per l'ESM
    ec_writestate(0);
-   ec_statecheck(0, EC_STATE_SAFE_OP,  5 * EC_TIMEOUTSTATE);
+   ec_statecheck(0, EC_STATE_INIT,  5 * EC_TIMEOUTSTATE);
+   
    ec_dcsync0(EPOS4,FALSE,0,0); //disattivo SYNC0
-   prova2=ec_DCtime;	
    ec_close();  //chiudo la connessione
-   cont=test;
+   shutdown=0;
    		
 }
 
 	  
 OSAL_THREAD_FUNC CSP_test(char *ifname){
-   int cnt,i;
+   int cnt;
 
    printf("Starting Redundant test\n");
 
-   /* initialise SOEM, bind socket to ifname */
+   //inizializza SOEM e lo collega alla porta ifname
    if (ec_init(ifname))
    {
       printf("ec_init on %s succeeded.\n",ifname);
-      /* find and auto-config slaves */
+       //trova e autoconfigura gli salve
       if ( ec_config_init(FALSE) > 0 )
       {
          printf("%d slaves found and configured.\n",ec_slavecount);
-         /* wait for all slaves to reach PRE_OP state */
+        
 		 ec_slave[0].state = EC_STATE_PRE_OP;
 		 ec_writestate (0);
 		 ec_statecheck(0, EC_STATE_PRE_OP, EC_TIMEOUTSTATE*4);
 		  
+		 //quando avviene la transizione PRE_OP->SAFE_OP chiama CSP_EPOSsetup per 
+		 //settare i parametri e mappare i PDO 
 		 ec_slave[EPOS4].PO2SOconfig = CSP_EPOSsetup; 
-		 
-		 double t=0;
-         double f=1;  //frequenza in Hz
-     
-	   for(int i=0;i<=CAMPIONI;i++){
-		    target_position_abs[i]=deg_to_inc((double)AMPIEZZA*sin(2*PI*f*t));
-		    //target_position_abs[i]=deg_to_inc(AMPIEZZA);
-			t+=PASSO; 
-		}
 
-         /* configure DC options for every DC capable slave found in the list */
+        //configura il meccanismo DC
          ec_configdc();
+         //mappa i PDO mappati precedentemente nel buffer locale
          ec_config_map(&IOmap);
         
         out_EPOS = (out_EPOSt*) ec_slave[1].outputs; //output del master
         in_EPOS = (in_EPOSt*) ec_slave[1].inputs;  //input del master
+        //leggi la posizione iniziale attuale per iniziare il movimento assumendo questa come 0
 		out_EPOS->position_offset=position_offset;
-        /* read individual slave state and store in ec_slave[] */
+         //legge e conserva lo stato nel vettore ec_slave[]
          ec_readstate();
          for(cnt = 1; cnt <= ec_slavecount ; cnt++)
          {
@@ -679,23 +677,24 @@ OSAL_THREAD_FUNC CSP_test(char *ifname){
 
          printf("Request operational state for all slaves\n");
          ec_slave[0].state = EC_STATE_OPERATIONAL;
-         /* request OP state for all slaves */
          ec_writestate(0);
-         // activate cyclic process data 
-         //dorun = 1;
+         //crea il thread real-time per lo scambio dati
          osal_thread_create(&thread1, stack8k * 2, &ecatthread, NULL);
-         /* wait for all slaves to reach OP state */
+          //dorun = 1;
+         //aspetta che tutti raggiungano OPERATIONAL
          ec_statecheck(0, EC_STATE_OPERATIONAL,  5 * EC_TIMEOUTSTATE);
+         
         
          if (ec_slave[0].state == EC_STATE_OPERATIONAL)
          {
             printf("Operational state reached for all slaves.Actual state=%d\n",ec_slave[0].state);
             inOP = TRUE;
-            /* acyclic loop */
-            for(int j = 0; j <= CAMPIONI; j++)
+           //ciclo per stampare i dati in tempo reale
+            //for(int j = 0; j <= CAMPIONI +1540; j++)
+            while(shutdown)
             {
-               printf("PDO n.%d,i=%d,target_position=%d,cycle1=%ld,cycle2=%d \n",
-                  dorun, check,out_EPOS->target_position,cycle,ec_slave[1].DCcycle);
+               printf("PDO n.i=%d,target_position=%d,cycle1=%ld,cycle2=%d \n",
+                  i,out_EPOS->target_position+out_EPOS->position_offset,cycle,ec_slave[1].DCcycle);
                   
                printf("statusword %4x,controlword %x, position_actual_value %d",
                in_EPOS->statusword,out_EPOS->controlword,in_EPOS->position_actual_value);
@@ -711,17 +710,15 @@ OSAL_THREAD_FUNC CSP_test(char *ifname){
          {
             printf("Not all slaves reached operational state.\n");
              ec_readstate();
-             for(i = 1; i<=ec_slavecount ; i++)
+             for(int j = 1; j<=ec_slavecount ; j++)
              {
-                 if(ec_slave[i].state != EC_STATE_OPERATIONAL)
+                 if(ec_slave[j].state != EC_STATE_OPERATIONAL)
                  {
                      printf("Slave %d State=0x%2.2x StatusCode=0x%4.4x : %s\n",
-                         i, ec_slave[i].state, ec_slave[i].ALstatuscode, ec_ALstatuscode2string(ec_slave[i].ALstatuscode));
+                         j, ec_slave[j].state, ec_slave[j].ALstatuscode, ec_ALstatuscode2string(ec_slave[j].ALstatuscode));
                  }
              }
          }
-         
-         
       }
       else
       {
@@ -734,6 +731,7 @@ OSAL_THREAD_FUNC CSP_test(char *ifname){
    {
       printf("No socket connection on %s\nExcecute as root\n",ifname);
    }
+   //prima di terminare aspetta che ecatthread abbia finito tutto
    pthread_join(thread1,NULL);
 }
 
@@ -820,10 +818,19 @@ int main(int argc, char *argv[]){
    
    if (argc > 0)
    {
-     dorun = 0;
+     //dorun = 0;
+     
+     double t=0;   //tempo in secondi
+	 double f=5;  //frequenza in Hz
+     
+	   for(int j=0;j<CAMPIONI;j++){
+		    target_position_abs[j]=deg_to_inc((double)AMPIEZZA*sin(2*PI*f*t));
+		    //target_position_abs[j]=deg_to_inc(AMPIEZZA);
+			t+=PASSO; 
+		}
 		
 	/* create RT thread */
-      //osal_thread_create(&thread1, stack8k * 2, &ecatthread, NULL);
+     // osal_thread_create(&thread1, stack8k * 2, &ecatthread, NULL);
 
       /* create thread to handle slave error handling in OP */
       osal_thread_create(&thread2, stack8k * 4, &ecatcheck, NULL);
@@ -832,7 +839,8 @@ int main(int argc, char *argv[]){
       /*osal_thread_create(&thread3, stack64k * 4, &CSP_test, argv[1]);
       pthread_join(thread1,NULL);*/
       CSP_test(argv[1]);
-    
+     
+   
    
 	FILE * fposizione,*fcicli,*fcorrente,*fp;
 	
@@ -840,36 +848,35 @@ int main(int argc, char *argv[]){
 	fcorrente=fopen("corrente.txt","wt");
 	fcicli=fopen("cicli.txt","wt");
 	 
-	for(int j=0;j<cont;j++){
-	       fprintf(fposizione,"%f %f %f\r\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),
+	for(int j=0;j<i;j++){
+		//matlab legge \n correttamente come a capo, in Windows serve \r\n
+	      fprintf(fposizione,"%f %f %f\r\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),
 	      inc_to_deg(misure_posizione[j]),inc_to_deg(target_position_abs[j]+position_offset));
 	        
-	       fprintf(fcicli,"%f %ld\r\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),cicli[j]); 
+	      fprintf(fcicli,"%f %ld\r\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),cicli[j]); 
 	       
-	       fprintf(fcorrente,"%f %d %d %d\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),misure_corrente[j],
+	      fprintf(fcorrente,"%f %d %d %d\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),misure_corrente[j],
 	       misure_rpm[j],misure_coppia[j]);
 	   }
 	   
 	 fclose(fposizione);
 	 fclose(fcicli);
 	 fclose(fcorrente);
+	  //per usare GNUplot da riga di comando
 	 fp = fopen("comando.txt", "wt"); 
-
-  
+   
     //scrivo sul file il comando da eseguire 
    
-  fprintf(fp, "plot \"corrente.txt\" with lines\n");
-
+    fprintf(fp, "plot \"corrente.txt\" with lines\n");
   
    //chiudo il file su cui ho scritto il comando da eseguire 
    
   fclose(fp); 
-
   
-   /*eseguo il programma GNUplot passandogli il nome del file che 
-   contiene il comando da eseguire*/
+   //eseguo il programma GNUplot passandogli il nome del file che contiene il comando da eseguire
    
-  system("gnuplot -persist comando.txt");    
+  //system("gnuplot -persist comando.txt"); 
+
 }
   else
    {
