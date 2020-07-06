@@ -569,7 +569,6 @@ OSAL_THREAD_FUNC ecatthread(){
              i++;
 		 }
 		 else{ 
-		 ec_send_processdata();
 		 exit(-1);
 		}
       //}
@@ -598,7 +597,6 @@ OSAL_THREAD_FUNC ecatthread(){
          i++;}
          
          else{ 
-			 ec_send_processdata();
 			 exit(-1);
 		 }
 	 }
@@ -667,7 +665,7 @@ OSAL_THREAD_FUNC CSP_test(char *ifname){
          out_EPOS = (out_EPOSt*) ec_slave[1].outputs; //output del master
          in_EPOS = (in_EPOSt*) ec_slave[1].inputs;  //input del master
          //leggi la posizione iniziale attuale per iniziare il movimento assumendo questa come 0
-         out_EPOS->position_offset=position_offset+deg_to_inc((double)AMPIEZZA/2);
+         out_EPOS->position_offset=position_offset+deg_to_inc((double)AMPIEZZA);
          
          //legge e conserva lo stato nel vettore ec_slave[]
          ec_readstate();
@@ -699,7 +697,6 @@ OSAL_THREAD_FUNC CSP_test(char *ifname){
             printf("Operational state reached for all slaves.Actual state=%d\n",ec_slave[0].state);
             inOP = TRUE;
            //ciclo per stampare i dati in tempo reale
-            //for(int j = 0; j <= CAMPIONI +1540; j++)
             while(shutdown)
             {
                printf("PDO n.i=%d,target_position=%d,cycle1=%ld,cycle2=%d \n",
@@ -832,9 +829,10 @@ int main(int argc, char *argv[]){
 	    double f=3;  //frequenza in Hz
 	    
 	   for(int j=0;j<CAMPIONI;j++){
-		    target_position_abs[j]=deg_to_inc(-((double)AMPIEZZA/2)*cos(2*PI*f*t));
-		    //target_position_abs[j]=deg_to_inc(AMPIEZZA); 
-			t+=PASSO;
+		    target_position_abs[j]=deg_to_inc(-((double)AMPIEZZA)*cos(2*PI*f*t));
+		    //target_position_abs[j]=deg_to_inc(((double)AMPIEZZA)*sin(2*PI*f*t));
+		    //target_position_abs[j]=deg_to_inc(AMPIEZZA);
+		    t+=PASSO;
 		}
 		
 	/* create RT thread */
@@ -858,13 +856,13 @@ int main(int argc, char *argv[]){
 	 
 	for(int j=0;j<i;j++){
 		//matlab legge \n correttamente come a capo, in Windows serve \r\n
-	      fprintf(fposizione,"%f %f %f\r\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),
-	      inc_to_deg(misure_posizione[j]),inc_to_deg(target_position_abs[j]+out_EPOS->position_offset));
+	     fprintf(fposizione,"%f %f %f\r\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),
+	     inc_to_deg(misure_posizione[j]),inc_to_deg(target_position_abs[j]+out_EPOS->position_offset));
 	        
-	      fprintf(fcicli,"%f %ld\r\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),cicli[j]); 
+	     fprintf(fcicli,"%f %ld\r\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),cicli[j]); 
 	       
-	      fprintf(fcorrente,"%f %d %d %d\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),misure_corrente[j],
-	       misure_rpm[j],misure_coppia[j]);
+	     fprintf(fcorrente,"%f %d %d %d\n",((double)(tv[j]-tv[0])/(double)(NSEC_PER_SEC)),misure_corrente[j],
+	     misure_rpm[j],misure_coppia[j]);
 	   }
 	   
 	 fclose(fposizione);
